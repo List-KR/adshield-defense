@@ -1,0 +1,79 @@
+name: Publish npm package
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version increment for a manual publish
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      VERSION_BUMP: ${{ inputs.bump || 'patch' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+      - name: Increment package version
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_name=$(node --print "require('./package.json').name")
+          published_version=$(npm view "$package_name" version 2>/dev/null || true)
+
+          if [[ -n "$published_version" ]]; then
+            npm version "$published_version" --no-git-tag-version --allow-same-version
+            npm version "$VERSION_BUMP" --no-git-tag-version
+          fi
+
+          package_version=$(node --print "require('./package.json').version")
+          echo "name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "version=$package_version" >> "$GITHUB_OUTPUT"
+
+      - run: npm run build
+      - run: npm publish --dry-run
+      - run: npm publish --access public
+
+      - name: Purge jsDelivr latest cache
+        continue-on-error: true
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          PACKAGE_VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          published_url="https://cdn.jsdelivr.net/npm/${PACKAGE_NAME}@${PACKAGE_VERSION}/dist/tinyShield.user.js"
+          latest_purge_url="https://purge.jsdelivr.net/npm/${PACKAGE_NAME}@latest/dist/tinyShield.user.js"
+
+          # Wait for the immutable release to propagate; only @latest is purged.
+          curl --fail --silent --show-error --retry 10 --retry-delay 3 --retry-all-errors "$published_url" --output /dev/null
+          curl --fail-with-body --silent --show-error "$latest_purge_url"
