@@ -14,6 +14,9 @@
   const propertyIsEnumerable = W.Object.prototype.propertyIsEnumerable;
   const isArray = W.Array.isArray;
   const nativeSources = new W.WeakMap();
+  const originalSetTimeout = W.setTimeout;
+  const restoreCallbacks = [];
+  let detected = false;
   const sourceOf = (fn) => apply(functionToString, fn, []);
   const test = (regexp, text) => apply(regexpTest, regexp, [text]);
 
@@ -31,6 +34,16 @@
     const proxy = new W.Proxy(target, { apply: handler });
     nativeSources.set(proxy, sourceOf(target));
     owner[key] = proxy;
+    restoreCallbacks.push(() => {
+      if (owner[key] === proxy) {
+        owner[key] = target;
+      }
+    });
+  }
+
+  function abortAdShield() {
+    detected = true;
+    throw new W.Error();
   }
 
   const toStringProxy = new W.Proxy(functionToString, {
@@ -40,6 +53,11 @@
   });
   nativeSources.set(toStringProxy, sourceOf(functionToString));
   W.Function.prototype.toString = toStringProxy;
+  restoreCallbacks.push(() => {
+    if (W.Function.prototype.toString === toStringProxy) {
+      W.Function.prototype.toString = functionToString;
+    }
+  });
 
   const initPatterns = [
     /[a-zA-Z0-9]+ *=> *{ *const *[a-zA-Z0-9]+ *= *[a-zA-Z0-9]+ *; *if/,
@@ -65,7 +83,7 @@
       typeof args[0] === 'function'
       && isInitFunction(sourceOf(args[0]))
     ) {
-      throw new W.Error();
+      abortAdShield();
     }
     return apply(target, thisArg, args);
   });
@@ -82,9 +100,10 @@
     if (typeof key === 'string') {
       if (
         typeof value === 'string'
+        && (key.includes('inventory_id') || value.includes('inventory_id'))
         && test(inventoryIdPattern, `${key},${value}`)
       ) {
-        throw new W.Error();
+        abortAdShield();
       }
       if (typeof value === 'function') {
         const text = `${key},${sourceOf(value)}`;
@@ -92,7 +111,7 @@
           text.includes('error-report.com')
           && all(reinsertionPatterns, text)
         ) {
-          throw new W.Error();
+          abortAdShield();
         }
       }
     }
@@ -171,7 +190,7 @@
 
   wrap(W.WeakMap.prototype, 'set', (target, thisArg, args) => {
     if (isInventoryObject(args[0])) {
-      throw new W.Error();
+      abortAdShield();
     }
     return apply(target, thisArg, args);
   });
@@ -203,9 +222,31 @@
   for (const key of ['setTimeout', 'setInterval']) {
     wrap(W, key, (target, thisArg, args) => {
       if (isAdShieldTimer(args[0])) {
+        detected = true;
         return undefined;
       }
       return apply(target, thisArg, args);
     });
+  }
+
+  function restoreIfUnused() {
+    if (detected) {
+      return;
+    }
+    for (let index = restoreCallbacks.length - 1; index >= 0; index--) {
+      restoreCallbacks[index]();
+    }
+  }
+
+  function scheduleRestore() {
+    apply(originalSetTimeout, W, [restoreIfUnused, 30_000]);
+  }
+
+  if (W.document?.readyState === 'complete') {
+    scheduleRestore();
+  } else if (typeof W.addEventListener === 'function') {
+    apply(W.addEventListener, W, ['load', scheduleRestore, { once: true }]);
+  } else {
+    scheduleRestore();
   }
 })();

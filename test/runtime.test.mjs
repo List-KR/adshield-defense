@@ -3,11 +3,27 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import vm from 'node:vm';
 
-test('runtime ignores ordinary calls and blocks Ad-Shield signatures', async () => {
+const runtime = await readFile(
+  new URL('../src/runtime.js', import.meta.url),
+  'utf8',
+);
+
+test('runtime blocks Ad-Shield and keeps hooks after detection', () => {
+  let loadHandler;
+  let restoreHandler;
   let timerCalls = 0;
   const context = vm.createContext({
-    setTimeout() {
+    document: { readyState: 'loading' },
+    addEventListener(event, handler) {
+      if (event === 'load') {
+        loadHandler = handler;
+      }
+    },
+    setTimeout(handler, delay) {
       timerCalls++;
+      if (delay === 30_000) {
+        restoreHandler = handler;
+      }
       return 1;
     },
     setInterval() {
@@ -15,11 +31,8 @@ test('runtime ignores ordinary calls and blocks Ad-Shield signatures', async () 
       return 1;
     },
   });
-  const runtime = await readFile(
-    new URL('../src/runtime.js', import.meta.url),
-    'utf8',
-  );
   vm.runInContext(runtime, context);
+  const patchedMapGet = vm.runInContext('Map.prototype.get', context);
 
   assert.equal(vm.runInContext(`new Map([['ok', 1]]).get('ok')`, context), 1);
   assert.equal(vm.runInContext(`new Map().set('ok', 1).get('ok')`, context), 1);
@@ -52,5 +65,55 @@ test('runtime ignores ordinary calls and blocks Ad-Shield signatures', async () 
   assert.match(
     vm.runInContext('Map.prototype.get.toString()', context),
     /^function get\(\) \{ \[native code\] \}$/,
+  );
+
+  loadHandler();
+  assert.equal(timerCalls, 2);
+  restoreHandler();
+  assert.equal(vm.runInContext('Map.prototype.get', context), patchedMapGet);
+});
+
+test('runtime restores hooks when no signature is detected', () => {
+  let loadHandler;
+  let restoreHandler;
+  const context = vm.createContext({
+    document: { readyState: 'loading' },
+    addEventListener(event, handler) {
+      if (event === 'load') {
+        loadHandler = handler;
+      }
+    },
+    setTimeout(handler, delay) {
+      if (delay === 30_000) {
+        restoreHandler = handler;
+      }
+      return 1;
+    },
+    setInterval() {
+      return 1;
+    },
+  });
+  const originals = vm.runInContext(`({
+    get: Map.prototype.get,
+    set: Map.prototype.set,
+    weakSet: WeakMap.prototype.set,
+    timeout: setTimeout,
+    interval: setInterval,
+    toString: Function.prototype.toString,
+  })`, context);
+
+  vm.runInContext(runtime, context);
+  assert.notEqual(vm.runInContext('Map.prototype.get', context), originals.get);
+  loadHandler();
+  restoreHandler();
+
+  assert.equal(vm.runInContext('Map.prototype.get', context), originals.get);
+  assert.equal(vm.runInContext('Map.prototype.set', context), originals.set);
+  assert.equal(vm.runInContext('WeakMap.prototype.set', context), originals.weakSet);
+  assert.equal(vm.runInContext('setTimeout', context), originals.timeout);
+  assert.equal(vm.runInContext('setInterval', context), originals.interval);
+  assert.equal(
+    vm.runInContext('Function.prototype.toString', context),
+    originals.toString,
   );
 });
