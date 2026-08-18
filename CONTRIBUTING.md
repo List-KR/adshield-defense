@@ -27,7 +27,7 @@ JavaScript는 저장소의 ESLint 설정을 따릅니다. 세미콜론을 사용
 
 ## 배포
 
-배포는 유지관리자가 담당합니다. `main` 브랜치에 push되면 GitHub Actions가 npm의 최신 버전을 기준으로 patch 버전을 자동 생성해 배포합니다. 수동 실행에서는 patch, minor, major 중 하나를 선택할 수 있습니다.
+배포는 유지관리자가 담당합니다. `master` 브랜치에 push되면 GitHub Actions가 npm의 최신 버전을 기준으로 patch 버전을 자동 생성해 배포합니다. 수동 실행에서는 patch, minor, major 중 하나를 선택할 수 있습니다.
 
 npm trusted publishing에는 이 저장소와 `.github/workflows/publish.yml`이 등록되어 있어야 합니다. jsDelivr purge는 항상 `@latest` 유저스크립트 URL만 대상으로 실행됩니다.
 

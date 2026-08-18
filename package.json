@@ -4,6 +4,10 @@
   "description": "Ad-Shield의 광고 재삽입을 차단하는 가벼운 유저스크립트",
   "type": "module",
   "license": "MPL-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/List-KR/adshield-defense.git"
+  },
   "engines": {
     "node": "24.x"
   },
