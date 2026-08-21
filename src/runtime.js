@@ -15,8 +15,11 @@
   const isArray = W.Array.isArray;
   const nativeSources = new W.WeakMap();
   const originalSetTimeout = W.setTimeout;
+  const originalRemoveChild = W.Node?.prototype.removeChild;
+  const ownScript = W.document?.currentScript;
   const restoreCallbacks = [];
   let detected = false;
+  let recoveryObserver;
   const sourceOf = (fn) => apply(functionToString, fn, []);
   const test = (regexp, text) => apply(regexpTest, regexp, [text]);
 
@@ -41,9 +44,146 @@
     });
   }
 
-  function abortAdShield() {
+  const adShieldHostPattern = /(^|\.)(ad-shield\.(io|cc)|adrecover\.com|cadmus\.script\.ac|css-load\.com|html-load\.com|content-loader\.com|img-load\.com|error-report\.com)$/i;
+
+  function attribute(node, name) {
+    try {
+      const value = node.getAttribute(name);
+      return typeof value === 'string' ? value : '';
+    } catch {
+      return '';
+    }
+  }
+
+  function isAdShieldUrl(value) {
+    if (!value || typeof W.URL !== 'function') {
+      return false;
+    }
+    try {
+      return test(adShieldHostPattern, new W.URL(value, W.location?.href).hostname);
+    } catch {
+      return false;
+    }
+  }
+
+  function isAdShieldNode(node) {
+    try {
+      if (
+        !node
+        || node === ownScript
+        || (node.tagName !== 'SCRIPT' && node.tagName !== 'IFRAME')
+      ) {
+        return false;
+      }
+      const src = attribute(node, 'src') || node.src;
+      if (isAdShieldUrl(src)) {
+        return true;
+      }
+      if (node.tagName === 'IFRAME') {
+        return false;
+      }
+      const handlers = `${attribute(node, 'onerror')},${attribute(node, 'onload')}`;
+      if (handlers.includes('error-report.com')) {
+        return true;
+      }
+      const text = node.textContent;
+      return typeof text === 'string'
+        && text.includes('error-report.com')
+        && (
+          text.includes('css-load.com')
+          || text.includes('html-load.com')
+          || text.includes('content-loader.com')
+        );
+    } catch {
+      return false;
+    }
+  }
+
+  function startRecoveryObserver() {
+    if (recoveryObserver || typeof W.MutationObserver !== 'function' || !W.document) {
+      return;
+    }
+    try {
+      recoveryObserver = new W.MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          for (const node of mutation.addedNodes) {
+            recoverAdShieldTree(node);
+          }
+        }
+      });
+      recoveryObserver.observe(W.document, { childList: true, subtree: true });
+    } catch {
+      recoveryObserver = undefined;
+    }
+  }
+
+  function markDetected() {
     detected = true;
+    startRecoveryObserver();
+  }
+
+  function neutralizeAdShieldNode(node, remove) {
+    markDetected();
+    try {
+      node.onerror = null;
+      node.onload = null;
+      node.removeAttribute('onerror');
+      node.removeAttribute('onload');
+    } catch {
+      // Keep removing a protected node even if its handlers cannot be cleared.
+    }
+    if (!remove || !node.parentNode) {
+      return;
+    }
+    try {
+      if (typeof originalRemoveChild === 'function') {
+        apply(originalRemoveChild, node.parentNode, [node]);
+      } else {
+        node.remove();
+      }
+    } catch {
+      // The hooks still block later Ad-Shield work if the node is protected.
+    }
+  }
+
+  function recoverAdShieldTree(root) {
+    if (!root) {
+      return false;
+    }
+    if (isAdShieldNode(root)) {
+      neutralizeAdShieldNode(root, true);
+      return true;
+    }
+    try {
+      for (const node of root.querySelectorAll('script,iframe')) {
+        if (isAdShieldNode(node)) {
+          neutralizeAdShieldNode(node, true);
+        }
+      }
+    } catch {
+      // Non-DOM roots and hostile page objects are ignored.
+    }
+    return false;
+  }
+
+  function abortAdShield() {
+    markDetected();
     throw new W.Error();
+  }
+
+  if (W.Node?.prototype) {
+    for (const key of ['appendChild', 'insertBefore', 'replaceChild']) {
+      if (typeof W.Node.prototype[key] !== 'function') {
+        continue;
+      }
+      wrap(W.Node.prototype, key, (target, thisArg, args) => {
+        if (isAdShieldNode(args[0])) {
+          neutralizeAdShieldNode(args[0], false);
+          return key === 'replaceChild' ? args[1] : args[0];
+        }
+        return apply(target, thisArg, args);
+      });
+    }
   }
 
   const toStringProxy = new W.Proxy(functionToString, {
@@ -222,7 +362,7 @@
   for (const key of ['setTimeout', 'setInterval']) {
     wrap(W, key, (target, thisArg, args) => {
       if (isAdShieldTimer(args[0])) {
-        detected = true;
+        markDetected();
         return undefined;
       }
       return apply(target, thisArg, args);
@@ -239,8 +379,11 @@
   }
 
   function scheduleRestore() {
+    recoverAdShieldTree(W.document);
     apply(originalSetTimeout, W, [restoreIfUnused, 30_000]);
   }
+
+  recoverAdShieldTree(W.document);
 
   if (W.document?.readyState === 'complete') {
     scheduleRestore();

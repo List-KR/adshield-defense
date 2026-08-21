@@ -117,3 +117,123 @@ test('runtime restores hooks when no signature is detected', () => {
     originals.toString,
   );
 });
+
+test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
+  let restoreHandler;
+
+  class FakeNode {
+    constructor(tagName = '', attributes = {}) {
+      this.tagName = tagName;
+      this.attributes = attributes;
+      this.children = [];
+      this.parentNode = null;
+      this.textContent = '';
+    }
+
+    get src() {
+      return this.getAttribute('src') ?? '';
+    }
+
+    setAttribute(name, value) {
+      this.attributes[name] = String(value);
+    }
+
+    getAttribute(name) {
+      return this.attributes[name] ?? null;
+    }
+
+    removeAttribute(name) {
+      delete this.attributes[name];
+    }
+
+    appendChild(node) {
+      this.children.push(node);
+      node.parentNode = this;
+      return node;
+    }
+
+    removeChild(node) {
+      const index = this.children.indexOf(node);
+      this.children.splice(index, 1);
+      node.parentNode = null;
+      return node;
+    }
+
+    querySelectorAll() {
+      return this.children.flatMap((child) => [
+        ...(['SCRIPT', 'IFRAME'].includes(child.tagName) ? [child] : []),
+        ...child.querySelectorAll(),
+      ]);
+    }
+  }
+
+  class FakeMutationObserver {
+    static last;
+
+    constructor(callback) {
+      this.callback = callback;
+      FakeMutationObserver.last = this;
+    }
+
+    observe() {}
+  }
+
+  const document = new FakeNode('#document');
+  document.readyState = 'complete';
+  const body = document.appendChild(new FakeNode('BODY'));
+  document.currentScript = body.appendChild(new FakeNode('SCRIPT'));
+  document.currentScript.textContent = 'css-load.com error-report.com';
+  const loader = new FakeNode('SCRIPT', {
+    src: 'https://css-load.com/loader.min.js',
+    onerror: `fetch('https://error-report.com/report')`,
+  });
+  body.appendChild(loader);
+  const originalAppendChild = FakeNode.prototype.appendChild;
+  const context = vm.createContext({
+    document,
+    location: { href: 'https://example.com/' },
+    MutationObserver: FakeMutationObserver,
+    Node: FakeNode,
+    URL,
+    setTimeout(handler, delay) {
+      if (delay === 30_000) {
+        restoreHandler = handler;
+      }
+      return 1;
+    },
+    setInterval() {
+      return 1;
+    },
+  });
+
+  vm.runInContext(runtime, context);
+  const patchedAppendChild = FakeNode.prototype.appendChild;
+
+  assert.equal(loader.parentNode, null);
+  assert.equal(loader.getAttribute('onerror'), null);
+  assert.equal(document.currentScript.parentNode, body);
+
+  const safeScript = new FakeNode('SCRIPT', {
+    src: 'https://example.com/loader.min.js',
+  });
+  assert.equal(body.appendChild(safeScript), safeScript);
+  assert.equal(safeScript.parentNode, body);
+
+  const retry = new FakeNode('SCRIPT', {
+    src: 'https://fallback.example/loader.min.js',
+    onerror: `fetch('https://error-report.com/report')`,
+  });
+  assert.equal(body.appendChild(retry), retry);
+  assert.equal(retry.parentNode, null);
+
+  const overlay = new FakeNode('IFRAME', {
+    src: 'https://info.error-report.com/modal',
+  });
+  originalAppendChild.call(body, overlay);
+  assert.equal(overlay.parentNode, body);
+  FakeMutationObserver.last.callback([{ addedNodes: [overlay] }]);
+  assert.equal(overlay.parentNode, null);
+
+  restoreHandler();
+  assert.equal(FakeNode.prototype.appendChild, patchedAppendChild);
+});
