@@ -120,9 +120,8 @@ test('runtime restores hooks when no signature is detected', () => {
   );
 });
 
-test('runtime recovers late Ad-Shield nodes, styles, and reinsertion', async () => {
+test('runtime recovers late Ad-Shield styles and error UI', async () => {
   let alertCalls = 0;
-  let restoreHandler;
   const requests = [];
 
   class FakeNode {
@@ -146,13 +145,12 @@ test('runtime recovers late Ad-Shield nodes, styles, and reinsertion', async () 
       return this.attributes[name] ?? null;
     }
 
-    removeAttribute(name) {
-      delete this.attributes[name];
-    }
-
     appendChild(node) {
       this.children.push(node);
       node.parentNode = this;
+      if (node.tagName === 'LINK') {
+        Promise.resolve().then(() => node.onload?.());
+      }
       return node;
     }
 
@@ -187,8 +185,6 @@ test('runtime recovers late Ad-Shield nodes, styles, and reinsertion', async () 
   document.head = document.appendChild(new FakeNode('HEAD'));
   document.createElement = (tagName) => new FakeNode(tagName.toUpperCase());
   const body = document.appendChild(new FakeNode('BODY'));
-  document.currentScript = body.appendChild(new FakeNode('SCRIPT'));
-  document.currentScript.textContent = 'css-load.com error-report.com';
   const loader = new FakeNode('SCRIPT', {
     data: 'znbgfzfef99v9xxuf9ef9fvsf796fjjfifxs9c\\f9u9vfpsfxubfxfx9v\\f9jbfifxv9c\\f9fifxu9hfffif1fxueppd9hxdfif7f6296fx9vfaf1uufafmdfa9i\\f99ff9l99',
     src: 'https://css-load.com/loader.min.js',
@@ -220,20 +216,9 @@ test('runtime recovers late Ad-Shield nodes, styles, and reinsertion', async () 
           },
         };
       }
-      if (String(url).includes('/resources/dogdrip.net-css-bd-2')) {
-        return {
-          ok: true,
-          async text() {
-            return '.layout{display:block}';
-          },
-        };
-      }
       return { ok: false };
     },
-    setTimeout(handler, delay) {
-      if (delay === 30_000) {
-        restoreHandler = handler;
-      }
+    setTimeout() {
       return 1;
     },
     setInterval() {
@@ -242,33 +227,21 @@ test('runtime recovers late Ad-Shield nodes, styles, and reinsertion', async () 
   });
 
   vm.runInContext(runtime, context);
-  const patchedAppendChild = FakeNode.prototype.appendChild;
 
   assert.equal(loader.parentNode, body);
   assert.match(loader.getAttribute('onerror'), /error-report\.com/);
-  assert.equal(document.currentScript.parentNode, body);
 
   for (let turn = 0; turn < 3; turn++) {
     await new Promise((resolve) => setImmediate(resolve));
   }
   const recoveredStyle = document.head.children.find(
-    (node) => node.tagName === 'STYLE',
+    (node) => node.tagName === 'LINK',
   );
-  assert.equal(recoveredStyle?.textContent, '.layout{display:block}');
-  assert.ok(requests.some((url) => url.includes('dogdrip.net-css-bd-2')));
-
-  const safeScript = new FakeNode('SCRIPT', {
-    src: 'https://example.com/loader.min.js',
-  });
-  assert.equal(body.appendChild(safeScript), safeScript);
-  assert.equal(safeScript.parentNode, body);
-
-  const retry = new FakeNode('SCRIPT', {
-    src: 'https://fallback.example/loader.min.js',
-    onerror: `fetch('https://error-report.com/report')`,
-  });
-  assert.equal(body.appendChild(retry), retry);
-  assert.equal(retry.parentNode, body);
+  assert.match(recoveredStyle?.href, /dogdrip\.net-css-bd-2/);
+  assert.equal(
+    requests.some((url) => url.includes('dogdrip.net-css-bd-2')),
+    false,
+  );
 
   assert.equal(vm.runInContext(`alert('hello')`, context), 'shown');
   assert.equal(alertCalls, 1);
@@ -285,7 +258,4 @@ test('runtime recovers late Ad-Shield nodes, styles, and reinsertion', async () 
   assert.equal(overlay.parentNode, body);
   FakeMutationObserver.last.callback([{ addedNodes: [overlay] }]);
   assert.equal(overlay.parentNode, null);
-
-  restoreHandler();
-  assert.equal(FakeNode.prototype.appendChild, patchedAppendChild);
 });

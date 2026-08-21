@@ -12,7 +12,7 @@ const dist = resolve(root, 'dist');
 const packageJson = JSON.parse(
   await readFile(resolve(root, 'package.json'), 'utf8'),
 );
-const raw = 'https://raw.githubusercontent.com/List-KR/adshield-defense/refs/heads/master/dist/tinyShield.user.js';
+const raw = 'https://raw.githubusercontent.com/List-KR/adshield-defense/refs/heads/userscript/tinyShield.user.js';
 const output = await build({
   entryPoints: [resolve(root, 'src/runtime.js')],
   legalComments: 'inline',
@@ -43,7 +43,4 @@ await mkdir(dist);
 await writeFile(
   resolve(dist, 'tinyShield.user.js'),
   header + output.outputFiles[0].text,
-);
-console.log(
-  `Built ${header.length + output.outputFiles[0].contents.length} byte universal userscript.`,
 );

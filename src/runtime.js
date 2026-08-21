@@ -157,9 +157,9 @@
     return [...urls];
   }
 
-  async function fetchText(url, cache) {
+  async function fetchText(url) {
     const response = await apply(originalFetch, W, [url, {
-      cache,
+      cache: 'no-cache',
       credentials: 'omit',
       referrerPolicy: 'no-referrer',
     }]);
@@ -173,14 +173,13 @@
     const urls = loaderUrls(node);
     for (const url of urls) {
       try {
-        const token = extractToken(await fetchText(url, 'no-cache'));
+        const token = extractToken(await fetchText(url));
         if (token) {
-          const origins = new W.Set();
-          origins.add(new W.URL(url).origin);
+          const origins = new W.Set([new W.URL(url).origin]);
           for (const candidate of urls) {
             origins.add(new W.URL(candidate).origin);
           }
-          return { token, origins };
+          return { origins, token };
         }
       } catch {
         // Try the next host copied from the loader's own fallback list.
@@ -195,7 +194,7 @@
     }
     const parent = W.document?.head || W.document?.documentElement;
     if (!parent || typeof W.document?.createElement !== 'function') {
-      return false;
+      return;
     }
     const style = W.document.createElement('style');
     style.setAttribute('data-adshield-defense', 'recovered');
@@ -203,6 +202,44 @@
     parent.appendChild(style);
     recoveredStyles.add(id);
     return true;
+  }
+
+  function loadStylesheet(url, id) {
+    if (recoveredStyles.has(id)) {
+      return W.Promise.resolve(true);
+    }
+    const parent = W.document?.head || W.document?.documentElement;
+    if (!parent || typeof W.document?.createElement !== 'function') {
+      return W.Promise.resolve(false);
+    }
+    return new W.Promise((resolve) => {
+      const link = W.document.createElement('link');
+      const finish = (loaded) => {
+        link.onload = null;
+        link.onerror = null;
+        if (loaded) {
+          recoveredStyles.add(id);
+        } else if (link.parentNode) {
+          try {
+            apply(originalRemoveChild, link.parentNode, [link]);
+          } catch {
+            // Leave a failed inert link behind if the page protects it.
+          }
+        }
+        resolve(loaded);
+      };
+      link.rel = 'stylesheet';
+      link.href = url;
+      link.referrerPolicy = 'no-referrer';
+      link.setAttribute('data-adshield-defense', 'recovered');
+      link.onload = () => finish(true);
+      link.onerror = () => finish(false);
+      try {
+        parent.appendChild(link);
+      } catch {
+        finish(false);
+      }
+    });
   }
 
   async function restoreStyles(node, payload) {
@@ -246,14 +283,9 @@
         if (resource.version === 2) {
           url += `&host=${W.encodeURIComponent(W.location.host)}`;
         }
-        try {
-          const css = await fetchText(url, 'force-cache');
-          if (injectStyle(css, resource.id)) {
-            restored = true;
-            break;
-          }
-        } catch {
-          // Resource mirrors share the token, so try the next one.
+        if (await loadStylesheet(url, resource.id)) {
+          restored = true;
+          break;
         }
       }
     }
@@ -363,11 +395,11 @@
 
   function recoverAdShieldTree(root) {
     if (!root) {
-      return false;
+      return;
     }
     if (isAdShieldNode(root)) {
       recoverAdShieldNode(root);
-      return true;
+      return;
     }
     try {
       for (const node of root.querySelectorAll('script,iframe')) {
@@ -378,7 +410,6 @@
     } catch {
       // Non-DOM roots and hostile page objects are ignored.
     }
-    return false;
   }
 
   function abortAdShield() {

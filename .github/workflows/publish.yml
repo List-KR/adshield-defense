@@ -27,8 +27,6 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
-    env:
-      VERSION_BUMP: ${{ inputs.bump || 'patch' }}
     steps:
       - uses: actions/checkout@v7
 
@@ -36,7 +34,6 @@ jobs:
         with:
           node-version: '24'
           registry-url: https://registry.npmjs.org
-          package-manager-cache: false
 
       - run: npm ci
       - run: npm run lint
@@ -44,7 +41,6 @@ jobs:
 
       - name: Increment package version
         id: package
-        shell: bash
         run: |
           set -euo pipefail
           package_name=$(node --print "require('./package.json').name")
@@ -52,30 +48,37 @@ jobs:
 
           if [[ -n "$published_version" ]]; then
             npm version "$published_version" --no-git-tag-version --allow-same-version
-            npm version "$VERSION_BUMP" --no-git-tag-version
+            npm version "${{ inputs.bump || 'patch' }}" --no-git-tag-version
           fi
 
           echo "name=$package_name" >> "$GITHUB_OUTPUT"
 
       - run: npm run build
-      - run: npm publish --dry-run
       - run: npm publish --access public
 
       - name: Update GitHub Raw userscript
-        shell: bash
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add --force dist/tinyShield.user.js
-          git commit -m "chore: update built userscript [skip ci]"
-          git push origin HEAD:master
+          raw_dir="$(mktemp -d)/userscript"
+
+          if git fetch origin userscript; then
+            git worktree add --detach "$raw_dir" FETCH_HEAD
+          else
+            git worktree add --detach "$raw_dir"
+            git -C "$raw_dir" switch --orphan userscript
+          fi
+
+          cp dist/tinyShield.user.js "$raw_dir/tinyShield.user.js"
+          git -C "$raw_dir" config user.name "github-actions[bot]"
+          git -C "$raw_dir" config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git -C "$raw_dir" add tinyShield.user.js
+          git -C "$raw_dir" commit -m "chore: update built userscript [skip ci]"
+          git -C "$raw_dir" push origin HEAD:userscript
 
       - name: Purge jsDelivr latest cache
         continue-on-error: true
         env:
           PACKAGE_NAME: ${{ steps.package.outputs.name }}
-        shell: bash
         run: |
           set -euo pipefail
           latest_purge_url="https://purge.jsdelivr.net/npm/${PACKAGE_NAME}@latest/dist/tinyShield.user.js"
