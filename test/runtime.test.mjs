@@ -119,6 +119,7 @@ test('runtime restores hooks when no signature is detected', () => {
 });
 
 test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
+  let alertCalls = 0;
   let restoreHandler;
 
   class FakeNode {
@@ -195,6 +196,13 @@ test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
     MutationObserver: FakeMutationObserver,
     Node: FakeNode,
     URL,
+    alert() {
+      alertCalls++;
+      return 'shown';
+    },
+    confirm() {
+      return true;
+    },
     setTimeout(handler, delay) {
       if (delay === 30_000) {
         restoreHandler = handler;
@@ -209,8 +217,8 @@ test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
   vm.runInContext(runtime, context);
   const patchedAppendChild = FakeNode.prototype.appendChild;
 
-  assert.equal(loader.parentNode, null);
-  assert.equal(loader.getAttribute('onerror'), null);
+  assert.equal(loader.parentNode, body);
+  assert.match(loader.getAttribute('onerror'), /error-report\.com/);
   assert.equal(document.currentScript.parentNode, body);
 
   const safeScript = new FakeNode('SCRIPT', {
@@ -224,7 +232,15 @@ test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
     onerror: `fetch('https://error-report.com/report')`,
   });
   assert.equal(body.appendChild(retry), retry);
-  assert.equal(retry.parentNode, null);
+  assert.equal(retry.parentNode, body);
+
+  assert.equal(vm.runInContext(`alert('hello')`, context), 'shown');
+  assert.equal(alertCalls, 1);
+  assert.throws(() => vm.runInContext(
+    `alert('Failed to load website properly since adblock is blocked')`,
+    context,
+  ));
+  assert.equal(alertCalls, 1);
 
   const overlay = new FakeNode('IFRAME', {
     src: 'https://info.error-report.com/modal',

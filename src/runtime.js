@@ -122,17 +122,9 @@
     startRecoveryObserver();
   }
 
-  function neutralizeAdShieldNode(node, remove) {
+  function recoverAdShieldNode(node) {
     markDetected();
-    try {
-      node.onerror = null;
-      node.onload = null;
-      node.removeAttribute('onerror');
-      node.removeAttribute('onload');
-    } catch {
-      // Keep removing a protected node even if its handlers cannot be cleared.
-    }
-    if (!remove || !node.parentNode) {
+    if (node.tagName !== 'IFRAME' || !node.parentNode) {
       return;
     }
     try {
@@ -151,13 +143,13 @@
       return false;
     }
     if (isAdShieldNode(root)) {
-      neutralizeAdShieldNode(root, true);
+      recoverAdShieldNode(root);
       return true;
     }
     try {
       for (const node of root.querySelectorAll('script,iframe')) {
         if (isAdShieldNode(node)) {
-          neutralizeAdShieldNode(node, true);
+          recoverAdShieldNode(node);
         }
       }
     } catch {
@@ -171,6 +163,15 @@
     throw new W.Error();
   }
 
+  function isAdShieldMessage(value) {
+    if (typeof value !== 'string') {
+      return false;
+    }
+    const lower = value.toLowerCase();
+    return lower.includes('failed to load website')
+      || (value.includes('애드블록') && value.includes('로드'));
+  }
+
   if (W.Node?.prototype) {
     for (const key of ['appendChild', 'insertBefore', 'replaceChild']) {
       if (typeof W.Node.prototype[key] !== 'function') {
@@ -178,12 +179,26 @@
       }
       wrap(W.Node.prototype, key, (target, thisArg, args) => {
         if (isAdShieldNode(args[0])) {
-          neutralizeAdShieldNode(args[0], false);
-          return key === 'replaceChild' ? args[1] : args[0];
+          recoverAdShieldNode(args[0]);
+          if (args[0].tagName === 'IFRAME') {
+            return key === 'replaceChild' ? args[1] : args[0];
+          }
         }
         return apply(target, thisArg, args);
       });
     }
+  }
+
+  for (const key of ['alert', 'confirm']) {
+    if (typeof W[key] !== 'function') {
+      continue;
+    }
+    wrap(W, key, (target, thisArg, args) => {
+      if (isAdShieldMessage(args[0])) {
+        abortAdShield();
+      }
+      return apply(target, thisArg, args);
+    });
   }
 
   const toStringProxy = new W.Proxy(functionToString, {

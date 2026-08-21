@@ -12,7 +12,7 @@ const dist = resolve(root, 'dist');
 const packageJson = JSON.parse(
   await readFile(resolve(root, 'package.json'), 'utf8'),
 );
-const cdn = `https://cdn.jsdelivr.net/npm/${packageJson.name}@latest/dist/tinyShield.user.js`;
+const raw = 'https://raw.githubusercontent.com/List-KR/adshield-defense/refs/heads/master/dist/tinyShield.user.js';
 const output = await build({
   entryPoints: [resolve(root, 'src/runtime.js')],
   legalComments: 'inline',
@@ -32,8 +32,8 @@ const header = [
   '// @run-at       document-start',
   '// @inject-into  page',
   '// @grant        none',
-  `// @updateURL    ${cdn}`,
-  `// @downloadURL  ${cdn}`,
+  `// @updateURL    ${raw}`,
+  `// @downloadURL  ${raw}`,
   '// ==/UserScript==',
   '',
 ].join('\n');

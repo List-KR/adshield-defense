@@ -17,7 +17,7 @@ on:
           - major
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 concurrency:
@@ -60,6 +60,16 @@ jobs:
       - run: npm run build
       - run: npm publish --dry-run
       - run: npm publish --access public
+
+      - name: Update GitHub Raw userscript
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --force dist/tinyShield.user.js
+          git commit -m "chore: update built userscript [skip ci]"
+          git push origin HEAD:master
 
       - name: Purge jsDelivr latest cache
         continue-on-error: true
