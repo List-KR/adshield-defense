@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { atob } from 'node:buffer';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
+import { setImmediate } from 'node:timers';
 import vm from 'node:vm';
 
 const runtime = await readFile(
@@ -118,9 +120,10 @@ test('runtime restores hooks when no signature is detected', () => {
   );
 });
 
-test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
+test('runtime recovers late Ad-Shield nodes, styles, and reinsertion', async () => {
   let alertCalls = 0;
   let restoreHandler;
+  const requests = [];
 
   class FakeNode {
     constructor(tagName = '', attributes = {}) {
@@ -181,10 +184,13 @@ test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
 
   const document = new FakeNode('#document');
   document.readyState = 'complete';
+  document.head = document.appendChild(new FakeNode('HEAD'));
+  document.createElement = (tagName) => new FakeNode(tagName.toUpperCase());
   const body = document.appendChild(new FakeNode('BODY'));
   document.currentScript = body.appendChild(new FakeNode('SCRIPT'));
   document.currentScript.textContent = 'css-load.com error-report.com';
   const loader = new FakeNode('SCRIPT', {
+    data: 'znbgfzfef99v9xxuf9ef9fvsf796fjjfifxs9c\\f9u9vfpsfxubfxfx9v\\f9jbfifxv9c\\f9fifxu9hfffif1fxueppd9hxdfif7f6296fx9vfaf1uufafmdfa9i\\f99ff9l99',
     src: 'https://css-load.com/loader.min.js',
     onerror: `fetch('https://error-report.com/report')`,
   });
@@ -192,16 +198,37 @@ test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
   const originalAppendChild = FakeNode.prototype.appendChild;
   const context = vm.createContext({
     document,
-    location: { href: 'https://example.com/' },
+    location: { host: 'example.com', href: 'https://example.com/' },
     MutationObserver: FakeMutationObserver,
     Node: FakeNode,
     URL,
+    atob,
     alert() {
       alertCalls++;
       return 'shown';
     },
     confirm() {
       return true;
+    },
+    async fetch(url) {
+      requests.push(String(url));
+      if (String(url).includes('/loader.min.js')) {
+        return {
+          ok: true,
+          async text() {
+            return `const a='eyJhbGci',b='.eyJleHA',c='.1234567890123456789012345678901234567890123'`;
+          },
+        };
+      }
+      if (String(url).includes('/resources/dogdrip.net-css-bd-2')) {
+        return {
+          ok: true,
+          async text() {
+            return '.layout{display:block}';
+          },
+        };
+      }
+      return { ok: false };
     },
     setTimeout(handler, delay) {
       if (delay === 30_000) {
@@ -220,6 +247,15 @@ test('runtime recovers late Ad-Shield nodes and blocks reinsertion', () => {
   assert.equal(loader.parentNode, body);
   assert.match(loader.getAttribute('onerror'), /error-report\.com/);
   assert.equal(document.currentScript.parentNode, body);
+
+  for (let turn = 0; turn < 3; turn++) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  const recoveredStyle = document.head.children.find(
+    (node) => node.tagName === 'STYLE',
+  );
+  assert.equal(recoveredStyle?.textContent, '.layout{display:block}');
+  assert.ok(requests.some((url) => url.includes('dogdrip.net-css-bd-2')));
 
   const safeScript = new FakeNode('SCRIPT', {
     src: 'https://example.com/loader.min.js',

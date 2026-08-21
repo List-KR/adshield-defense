@@ -15,10 +15,14 @@
   const isArray = W.Array.isArray;
   const nativeSources = new W.WeakMap();
   const originalSetTimeout = W.setTimeout;
+  const originalFetch = W.fetch;
   const originalRemoveChild = W.Node?.prototype.removeChild;
   const ownScript = W.document?.currentScript;
   const restoreCallbacks = [];
+  const styleRecoveries = new W.Map();
+  const recoveredStyles = new W.Set();
   let detected = false;
+  let payloadKeys;
   let recoveryObserver;
   const sourceOf = (fn) => apply(functionToString, fn, []);
   const test = (regexp, text) => apply(regexpTest, regexp, [text]);
@@ -45,6 +49,9 @@
   }
 
   const adShieldHostPattern = /(^|\.)(ad-shield\.(io|cc)|adrecover\.com|cadmus\.script\.ac|css-load\.com|html-load\.com|content-loader\.com|img-load\.com|error-report\.com)$/i;
+  const jwtPattern = /^eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{43}$/;
+  // ponytail: legacy payload keys; parse new formats when they appear live.
+  const payloadKeyData = 'W1siZGdnbiIsIl9sPCBWenFERjoyZzYxd3tpbShcIjdMQVphL15qJSdLPyIsIngyOWhiOHB3dnNpbGNtcTA2NXQ0Mzdybnl1bzFqZnprZSIsMTAzLCJgSDs0U3lNQi5cbmZ1eG52I1JyUDNFSlEmOVlbTzBjXHRDVW8iLCJ4OGIzbG4xazltY2VpczR1MHdoam95cnp2NXFndGFwZjI3Iiw5NywiTlhHdDU9fV1iSWtoKThUPnAtfGVXcyIsInF4bjZpdXAzb3Q4Z3o3ZmxjdzA5YnkiXSxbIml0aGMiLCJCIGMxXHQzRlklPGZfYjJsdV44Wk5DeiNHJ3ZXTTdyJlE9IiwiczN6Ym85YWhnZjdsazV5MGN1bXJwcW53eDZpNGpldnQyIiw1Niwia2AoNTl3ailcIntnPnNvNlRpQXhcbkxQP3FhcHQwXS1JeWUiLCJrNTIzdGxwemVxdnMweWpoODFvZ3VhNnduYnI3YzltZjRpIiw0OSwiaG5bUlhtfERPSC86LkVWS0o7NH1TVSIsIm0wcnlpcXQ4MzYycDFmYXVsajR6Z2giXSxbImlycnIiLCJXMHw3X3p9e3JvWWtoWExeJSgnLz5OdFFHZ3VaU0E0dlUiLCJ2OWFweWlrNjIzMGo1bWw3bjhidXFyZjF6Z3NjZXd4dDQiLDExMSwieWpNRi1mXCJSW1x0SHd4bnMpcElDMT0yNThFOTZQSzpKT1xuIiwiN2d0a3JwYzQ1bndoNmk4amZ2OTNic3lsYXFlem11Mm8xMCIsMTA0LCJtaWxiYCMzQmFxXTtEVFY/ZS48ICZjIiwiMHQ4a2JmMjZ1ejlzbWg3MTRwY2V4eSJdLFsidmtkcyIsIm5TeU5ERydNai9vPFUgbFwiUUVrbWlYMkh7WllKaDQlPV8iLCJ2YnJsNHM3dTlmOG56NWpwcWkwbXd0ZTZjeWhhZzEzb3giLDEwNywiVHNwektWdkwzOSk6UFJhOHg7LnVnKGB0P3ddNkNPZkYxIiwidXNqbDRmaHdicHIzaXl6NXhnODZtOWV2Y243b2swYTIxdCIsNTAsIltcdGUmNUJeVz4wI1xucmJxSTd9LUF8YyIsInV5OG9hMnM2ZzRqMzAxdDliaXA3cmMiXSxbInptcGMiLCJpO1VqJ1s8d1wiRFQwbFpMZ1M4ZiNoeHNNVn10eTpFLSlgIiwiM2M1MWdvcTQwcHphbDlyNnh1dnRrZXkyc3duajdtaWhiIiwxMDIsIms5NllLKHYvJklDbUdCXHQ1YnphP0hjUF8xVyBxUm9BLj1cbiIsIm10ZXFoMHlzNjJwMWZ4ajU4OXJvNGF1bnpsaWczYzd3YmsiLDU2LCJ7ZUYlT1hyUTI+bnAzSk5dNDd1IiwiOWptYW53eXF4MHM1NHp1dG82aCJdLFsiZndiaCIsIng1QThoRTk9XG5RRzFcIkN1SidvVihJKT5sYlc0RCNlIEw2Iiwid3IyNzV5b2dzajRrdjAzaXpjbngxdWFxYjhwZmxtNnRoIiw1NywiMyV0XHR7MnJja2Z5WFJdP05LJi9GZ3c7VFNNbW4tN19pVS4iLCJ5OTNyZnRzN2x4cTh2a2dqZW41bTBpNnd6aGFwMXVjYjJvIiwxMDEsIn1xQjx6YFBaW1lIOjBzanZhT3AiLCI2bTdrd2UzcWFvaHU1ZzRiejhpIl0sWyJxYnV3IiwiaTtVaidbPHdcIkRUMGxaTGdTOGYjaHhzTVZ9dHk6RS0pYCIsIjNjNTFnb3E0MHB6YWw5cjZ4dXZ0a2V5MnN3bmo3bWloYiIsMTAyLCJrOTZZSyh2LyZJQ21HQlx0NWJ6YT9IY1BfMVcgcVJvQS49XG4iLCJtdGVxaDB5czYycDFmeGo1ODlybzRhdW56bGlnM2M3d2JrIiw1Niwie2VGJU9YclEyPm5wM0pOXTQ3dSIsIjlqbWFud3lxeDBzNTR6dXRvNmgiXSxbIm5sb2MiLCJ4PFt5a1klMS1zSzlfQzBSYWojOE9MbF0vSHdocUZVXHQzIiwiMG96dXBrcng2cWp3bnlnbDM0bTdpOXRoMWY4djJiZWM1Iiw5NywiJm0yR1Q1SXJQXCIgLkIobz06aWdiSnBXbno3dGN2TlpgPlxuIiwiNzRoZnZidGNqMmVyb2EwdWw1Nnl3M2lucXhrZ3A5bTF6cyIsMTE1LCJ1VjZ9KVEnP0R7U2VBTVg0O0VmIiwiOTF5c3hlOGx1b3JuNnZwY2l3cSJdLFsia3luYiIsIjBObX11YkM5TDZrezcoXCJueD5zPUtvXUlCdy95U2dmJVciLCJhMjc0YmNsanR2MG9tdzZ6OWc1cDEzdXM4ZWtoeGlyZnEiLDEyMSwiZT9gM0FVPDJaWztcdGlKRUZWJ3xQYThUNWotLnYgOnEjSCkiLCJlb3c1cmZsdXE4eDR6Z2o3MHAxM2NpNm1oMnM5dG5rYWJ2IiwxMTAsIiZYRF9RT2hNcmx0cFIxYzR6R1xuWSIsImM3ODYzcWJzbXd5NTRvdG5oaXYxIl0sWyJ1eXlrIiwiVHg8V3xYdmN1YkN6LWVrVS8gb2lNXHQmOiVJZz4yaHtzWyIsIm1qYjBmZXU2bHp4N2txaGdvcDRhdDgzMWM5Mnl3aXI1biIsMTE4LCI1ZjtWdFwicURMQjkxJ21cbn0/UjZTKFojQWBKcjBIUWxLUCkiLCJxcDVyODQyeWN2eGpvd2Jhejd1aHRzOWdrNmkwZW1uMTNmIiwxMTUsIk5HbkU4YV95LkZqWU89NHczXXA3Iiwia24xZWhvNmZqYnI0MHB4YzlpMnEiXSxbInJ5cGEiLCJCOCAvWTlvXVZIQ19wM3l0XG5oVE9OaTVxNklHLXI9MmclIiwidWwyb3cwMWo5enE1OG1mazRjdjM3YWJzeWlndGVoNnhuIiwxMTIsIm5FZUpLYS46UHtBO3gwVUxcIjQnWEZtfH13ZnZ6USM3WlMoIiwibTg5NjFxd3pnaHUyN3hlb2FwbjNrNWlsdnJmamM0c3l0MCIsMTE0LCImajxSRHNbVz5idWtNYGM/MSlcdGwiLCI2YWt5aG9yODBtMzdzbGZ3MXZ4cCJdLFsiZWhvciIsIlwicTRcbkozZmtaaGombHRgd0g1MFQ9J2d8KEVQW0ItUVlEIiwiN3VpbDVhM2d4YnJwdHZqZXltbzRjMDl3cXpzNjgybmYxIiwxMDcsIjxHY3BPSS9cdHpBWCU2PzlvIHIuYm1GUmllPktzXyl2O1Z1IiwieXB3engydXNtOG9nNXE3NHRhbmxiNnJpM3ZjZWhqOWtmMSIsMTA0LCI3eTp4MjE4XVUjTkN9bldhTVN7TCIsImJqYTN6a2Z2cWx0Z3U1c3c2NzhuIl0sWyJma2FkIiwiN3o+Z317L1cjYGNbWlQmc0k8Mi1oYUtYWVxubyl4U0ZBIiwibml1ZTh0bXlhY2ozbDkxcTY1Znhid3pydjdwbzJnazQwIiwxMTUsIjFFSGIufHU/cChxZlBpdHkncjZPJVx0dz1dOUJKUkQ7OjhrIiwicGhtMjF2OWN3NGI3M3lnbG5meG90YXpzdWo4cXJrNjUwaSIsMTA0LCJRal4gTkNVdjU0bGVcIlZNbV8zMEdMIiwiYml4cXJod245emptNTRvMTJmZTBzIl0sWyJzdm1tIiwibWFHO0ZULmUyY1l6VjolaX0pZzRicC1LVVp5PHdMXG5fPyIsIjFud3NyN3ZrOGZoMGwzdXQ5MmppZ3F4Nno0NWNwYm15byIsOTcsImtyQkp0RChRbHZePiNbaHtYMTlvJlNFQU0vblwiTz0gMDVQIiwiMzZxejBtdjl0bmU3a3dyYTVpMXVqeDI4b3lmc3BjZ2xoNCIsMTAxLCJ8YFx0J1JxajZDTldIXUk4c3g3dTNmIiwid2VneWpwenV4MzhxMmE5dm1pZm90Il0sWyJjb2txIiwiXCIociU5NmpWSzd7a1BcdGdEaE9jRnMnMTtNXCJJdVFaL3lxQVwiIiwiaXp4c29tcWgzcDhidmdhNDl3N2Z5MnRsdWM2ZTVuMDFyIiwxMDYsIl56R1t3bVxuQ2A9OEJ2PjwmXTA6VCBMI3B4M1hsaS1uKS40IiwicDkxdHp4NGlic2h3ZjNxeWVuNTA2dWdvMm1rdjhscmpjNyIsMTA3LCJFWWY/Uk4yYX1XYlU1ZUhffFN0Sm8iLCJzbThma2hyd2E5NHkwZXVwajJucTEiXSxbInpuYmciLCIoXHRFSENfO3MvLldnTmZWbCB6OU1ZaFF9VGo6SkZVUykjIiwibzVoa203OHVwMnl4d3Z6c2owYXQxYmdscjZlaTQzbmNxIiwxMDIsIktaaXteNDxtXCI1J2MlXG5YTHVyeXBxQThbZUl3LURSfGtiQiIsIm91N2VyY3Z3OWwwMXlnaG5maXA2ODVienhxdGFrM3NqbTQiLDU3LCI9NmEwRz5QT28zN252P3gmMWBdMnQiLCJjcnhtamY3eWhndDZvM3A4bDA5aXYiXV0=';
 
   function attribute(node, name) {
     try {
@@ -53,6 +60,218 @@
     } catch {
       return '';
     }
+  }
+
+  function decodePayload(payload) {
+    try {
+      payloadKeys ??= W.JSON.parse(W.atob(payloadKeyData));
+      let key;
+      for (const candidate of payloadKeys) {
+        if (candidate[0] === payload.slice(0, 4)) {
+          key = candidate;
+          break;
+        }
+      }
+      if (!key) {
+        return [];
+      }
+      const unwrap = (input, output, character) => {
+        const index = output.indexOf(character);
+        return index < 0 ? character : input[index];
+      };
+      let decoded = '';
+      let mode = 0;
+      for (const character of payload.slice(4)) {
+        if (!mode && character === W.String.fromCharCode(key[3])) {
+          mode = 1;
+          continue;
+        }
+        if (!mode && character === W.String.fromCharCode(key[6])) {
+          mode = 2;
+          continue;
+        }
+        if (mode === 1) {
+          mode = 0;
+          decoded += key[5].includes(character)
+            ? unwrap(key[4], key[5], character)
+            : unwrap(key[1], key[2], character) + character;
+          continue;
+        }
+        if (mode === 2) {
+          mode = 0;
+          decoded += key[8].includes(character)
+            ? unwrap(key[7], key[8], character)
+            : unwrap(key[1], key[2], character) + character;
+          continue;
+        }
+        decoded += unwrap(key[1], key[2], character);
+      }
+      return W.JSON.parse(decoded);
+    } catch {
+      return [];
+    }
+  }
+
+  function extractToken(source) {
+    const fragments = [];
+    const pattern = /(['"])([A-Za-z0-9_.-]{4,})\1/g;
+    let match;
+    while ((match = pattern.exec(source)) !== null) {
+      fragments.push(match[2]);
+    }
+    for (let start = 0; start < fragments.length; start++) {
+      if (!fragments[start].startsWith('eyJ')) {
+        continue;
+      }
+      let token = '';
+      for (let index = start; index < Math.min(start + 20, fragments.length); index++) {
+        token += fragments[index];
+        if (test(jwtPattern, token)) {
+          return token;
+        }
+        if (token.length > 2_048) {
+          break;
+        }
+      }
+    }
+    return '';
+  }
+
+  function loaderUrls(node) {
+    const urls = new W.Set();
+    try {
+      const source = new W.URL(attribute(node, 'src') || node.src, W.location?.href);
+      urls.add(source.href);
+      const hostPattern = /['"]([a-z0-9.-]+\.[a-z]{2,})['"]/gi;
+      const handler = attribute(node, 'onerror');
+      let match;
+      while ((match = hostPattern.exec(handler)) !== null) {
+        urls.add(`https://${match[1]}${source.pathname}`);
+      }
+      for (const host of ['css-load.com', 'html-load.com', 'content-loader.com']) {
+        urls.add(`https://${host}${source.pathname}`);
+      }
+    } catch {
+      // Invalid script URLs cannot provide recovery resources.
+    }
+    return [...urls];
+  }
+
+  async function fetchText(url, cache) {
+    const response = await apply(originalFetch, W, [url, {
+      cache,
+      credentials: 'omit',
+      referrerPolicy: 'no-referrer',
+    }]);
+    if (!response?.ok) {
+      throw new W.Error();
+    }
+    return response.text();
+  }
+
+  async function findToken(node) {
+    const urls = loaderUrls(node);
+    for (const url of urls) {
+      try {
+        const token = extractToken(await fetchText(url, 'no-cache'));
+        if (token) {
+          const origins = new W.Set();
+          origins.add(new W.URL(url).origin);
+          for (const candidate of urls) {
+            origins.add(new W.URL(candidate).origin);
+          }
+          return { token, origins };
+        }
+      } catch {
+        // Try the next host copied from the loader's own fallback list.
+      }
+    }
+    return undefined;
+  }
+
+  function injectStyle(css, id) {
+    if (!css.trim() || recoveredStyles.has(id)) {
+      return false;
+    }
+    const parent = W.document?.head || W.document?.documentElement;
+    if (!parent || typeof W.document?.createElement !== 'function') {
+      return false;
+    }
+    const style = W.document.createElement('style');
+    style.setAttribute('data-adshield-defense', 'recovered');
+    style.textContent = css;
+    parent.appendChild(style);
+    recoveredStyles.add(id);
+    return true;
+  }
+
+  async function restoreStyles(node, payload) {
+    const entries = payload.startsWith('<') ? [{ tags: payload }] : decodePayload(payload);
+    if (!isArray(entries)) {
+      return false;
+    }
+    const resources = [];
+    let restored = false;
+    for (const [index, entry] of entries.entries()) {
+      if (typeof entry?.stylesheet === 'string') {
+        restored = injectStyle(entry.stylesheet, `${payload}:${index}`) || restored;
+      }
+      if (typeof entry?.tags !== 'string') {
+        continue;
+      }
+      const stylePattern = /<style[^>]*>([\s\S]*?)<\/style>/gi;
+      let match;
+      while ((match = stylePattern.exec(entry.tags)) !== null) {
+        restored = injectStyle(match[1], `${payload}:style:${index}`) || restored;
+      }
+      const resourcePattern = /resources(-v2)?:\/\/([A-Za-z0-9._/-]+)/g;
+      while ((match = resourcePattern.exec(entry.tags)) !== null) {
+        resources.push({ id: match[2], version: match[1] ? 2 : 1 });
+      }
+    }
+    if (!resources.length || typeof originalFetch !== 'function') {
+      return restored;
+    }
+    const access = await findToken(node);
+    if (!access) {
+      return restored;
+    }
+    for (const resource of resources) {
+      if (recoveredStyles.has(resource.id)) {
+        continue;
+      }
+      for (const origin of access.origins) {
+        const path = resource.version === 2 ? 'resources/v2' : 'resources';
+        let url = `${origin}/${path}/${resource.id}?token=${W.encodeURIComponent(access.token)}`;
+        if (resource.version === 2) {
+          url += `&host=${W.encodeURIComponent(W.location.host)}`;
+        }
+        try {
+          const css = await fetchText(url, 'force-cache');
+          if (injectStyle(css, resource.id)) {
+            restored = true;
+            break;
+          }
+        } catch {
+          // Resource mirrors share the token, so try the next one.
+        }
+      }
+    }
+    return restored;
+  }
+
+  function recoverStyles(node) {
+    const payload = attribute(node, 'data') || attribute(node, 'wp-data');
+    if (!payload || styleRecoveries.has(payload)) {
+      return;
+    }
+    const recovery = restoreStyles(node, payload);
+    styleRecoveries.set(payload, recovery);
+    recovery.then((restored) => {
+      if (!restored) {
+        styleRecoveries.delete(payload);
+      }
+    }, () => styleRecoveries.delete(payload));
   }
 
   function isAdShieldUrl(value) {
@@ -124,6 +343,10 @@
 
   function recoverAdShieldNode(node) {
     markDetected();
+    if (node.tagName === 'SCRIPT') {
+      recoverStyles(node);
+      return;
+    }
     if (node.tagName !== 'IFRAME' || !node.parentNode) {
       return;
     }
