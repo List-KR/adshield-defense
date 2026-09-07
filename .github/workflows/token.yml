@@ -1,0 +1,64 @@
+name: Refresh Ad-Shield token
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+  workflow_run:
+    workflows:
+      - Publish npm package
+    types:
+      - completed
+
+permissions:
+  contents: write
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: userscript
+
+      - name: Refresh token
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { writeFile } from 'node:fs/promises';
+
+          const response = await fetch('https://css-load.com/loader.min.js');
+          if (!response.ok) throw new Error(`loader: ${response.status}`);
+          const source = await response.text();
+          const fragments = [...source.matchAll(/(['"])([A-Za-z0-9_.-]{4,})\1/g)]
+            .map((match) => match[2]);
+          let token;
+
+          for (let start = 0; start < fragments.length && !token; start++) {
+            if (!fragments[start].startsWith('eyJ')) continue;
+            let candidate = '';
+            for (let index = start; index < Math.min(start + 20, fragments.length); index++) {
+              candidate += fragments[index];
+              if (/^eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{43}$/.test(candidate)) {
+                token = candidate;
+                break;
+              }
+            }
+          }
+
+          if (!token) throw new Error('token not found');
+          const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url'));
+          if (claims.exp * 1000 < Date.now() + 3_600_000) throw new Error('token expires too soon');
+          await writeFile('token.txt', `${token}\n`);
+          NODE
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add token.txt
+          git diff --cached --quiet || git commit -m "chore: refresh recovery token [skip ci]"
+          git push origin HEAD:userscript

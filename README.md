@@ -21,9 +21,11 @@ Tampermonkey 또는 Violentmonkey에서 위 설치 링크를 열어 설치할 �
 
 ## 동작 방식
 
-스크립트는 웹페이지가 시작될 때 실행되어 Ad-Shield 특유의 광고 초기화 및 재삽입 코드만 감지해 중단합니다. 관련 없는 일반 JavaScript 호출은 원래 동작으로 즉시 넘깁니다.
+스크립트는 웹페이지가 시작될 때 실행되어 Ad-Shield 특유의 광고 초기화 및 재삽입 코드만 감지해 중단합니다. 동적으로 삽입되는 loader와 재삽입 스크립트는 실행 전에 비활성화하고, 함수 기반 보조 검사는 함수별로 한 번만 수행합니다. WeakMap 검사는 getter를 실행하지 않고 impression 데이터만 확인하며, 타이머는 실행 중인 loader의 출처로 판단합니다.
 
-페이지 로드 후 30초 동안 Ad-Shield 시그니처가 감지되지 않으면 설치했던 JavaScript 훅을 원래 상태로 복구합니다. 시그니처가 한 번이라도 감지된 페이지에서는 광고 재삽입을 계속 막기 위해 훅을 유지합니다.
+`data`, `wp-data`, `data-resource`에 담긴 CSS는 별도로 복원합니다. 같은 loader의 토큰 조회와 같은 CSS의 동시 요청을 공유하고, 요청이 5초 동안 완료되지 않으면 다음 호스트를 시도합니다. payload 디코딩 표는 2026-09-07에 확인한 loader 형식과 이전 형식을 지원하며, 형식이 바뀌면 갱신이 필요합니다.
+
+페이지 로드 후 30초 동안 Ad-Shield 시그니처가 감지되지 않으면 설치했던 JavaScript 훅을 원래 상태로 복구하고 DOM 감시도 중단합니다. 시그니처가 한 번이라도 감지된 페이지에서는 광고 재삽입을 계속 막기 위해 훅을 유지합니다.
 
 모든 HTTP 및 HTTPS 웹사이트에서 일찍 실행되어야 감지가 가능하지만, 방문 기록이나 페이지 내용을 저장하거나 외부로 전송하지 않습니다.
 
@@ -39,4 +41,4 @@ Tampermonkey 또는 Violentmonkey에서 위 설치 링크를 열어 설치할 �
 
 ## 라이선스
 
-이 프로젝트는 [MPL-2.0](./LICENSE)으로 배포됩니다. 핵심 차단 로직은 [FilteringDev/tinyShield](https://github.com/FilteringDev/tinyShield)를 바탕으로 재구성했습니다.
+이 프로젝트는 [MPL-2.0](./LICENSE)으로 배포됩니다. 2b0ef9a40c2824861e2b11ec395c9c1dce94d4fe 커밋 이전까지의 버전은 [FilteringDev/tinyShield](https://github.com/FilteringDev/tinyShield)를 바탕으로 작성되었습니다. 현재의 탐지·훅 구현은 로더 동작을 분석해 재작성했으며, 기존 기여 이력과 MPL-2.0 고지는 유지합니다.

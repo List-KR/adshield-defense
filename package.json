@@ -1,6 +1,6 @@
 {
   "name": "@list-kr/adshield-defense",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ad-Shield의 광고 재삽입을 차단하는 가벼운 유저스크립트",
   "type": "module",
   "license": "MPL-2.0",

@@ -1,6 +1,7 @@
 /*!
  * @license MPL-2.0
- * Derived from FilteringDev/tinyShield's monkey-patch logic.
+ * Earlier revisions derived from FilteringDev/tinyShield (see Git history).
+ * Runtime detection reimplemented from Ad-Shield behavior.
  * https://mozilla.org/MPL/2.0/
  */
 (() => {
@@ -8,50 +9,53 @@
 
   // ponytail: universal early hooks trade small per-call overhead for document-start coverage.
   const W = globalThis;
+  const document = W.document;
   const apply = W.Reflect.apply;
   const functionToString = W.Function.prototype.toString;
   const regexpTest = W.RegExp.prototype.test;
-  const propertyIsEnumerable = W.Object.prototype.propertyIsEnumerable;
+  const descriptor = W.Object.getOwnPropertyDescriptor;
+  const weakSet = W.WeakMap.prototype.set;
   const isArray = W.Array.isArray;
-  const nativeSources = new W.WeakMap();
+  const originals = new W.WeakMap();
+  const functionKinds = new W.WeakMap();
   const originalSetTimeout = W.setTimeout;
+  const originalClearTimeout = W.clearTimeout;
   const originalFetch = W.fetch;
   const originalRemoveChild = W.Node?.prototype.removeChild;
-  const ownScript = W.document?.currentScript;
+  const ownScript = document?.currentScript;
   const restoreCallbacks = [];
   const styleRecoveries = new W.Map();
   const recoveredStyles = new W.Set();
+  const pendingStyles = new W.Map();
+  const loaderAccess = new W.Map();
   let detected = false;
   let payloadKeys;
+  const decodingTables = new W.Map();
   let recoveryObserver;
   const sourceOf = (fn) => apply(functionToString, fn, []);
   const test = (regexp, text) => apply(regexpTest, regexp, [text]);
 
-  function all(patterns, text) {
-    for (const pattern of patterns) {
-      if (!test(pattern, text)) {
-        return false;
-      }
+  function install(owner, key, inspect) {
+    const original = owner[key];
+    if (typeof original !== 'function') {
+      return;
     }
-    return true;
-  }
-
-  function wrap(owner, key, handler) {
-    const target = owner[key];
-    const proxy = new W.Proxy(target, { apply: handler });
-    nativeSources.set(proxy, sourceOf(target));
-    owner[key] = proxy;
-    restoreCallbacks.push(() => {
-      if (owner[key] === proxy) {
-        owner[key] = target;
-      }
+    const replacement = new W.Proxy(original, {
+      apply(target, receiver, args) {
+        inspect(args);
+        return apply(target, receiver, args);
+      },
     });
+    apply(weakSet, originals, [replacement, original]);
+    owner[key] = replacement;
+    restoreCallbacks.push([owner, key, original, replacement]);
   }
 
   const adShieldHostPattern = /(^|\.)(ad-shield\.(io|cc)|adrecover\.com|cadmus\.script\.ac|css-load\.com|html-load\.com|content-loader\.com|img-load\.com|error-report\.com)$/i;
   const jwtPattern = /^eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]{43}$/;
-  // ponytail: legacy payload keys; parse new formats when they appear live.
-  const payloadKeyData = 'W1siZGdnbiIsIl9sPCBWenFERjoyZzYxd3tpbShcIjdMQVphL15qJSdLPyIsIngyOWhiOHB3dnNpbGNtcTA2NXQ0Mzdybnl1bzFqZnprZSIsMTAzLCJgSDs0U3lNQi5cbmZ1eG52I1JyUDNFSlEmOVlbTzBjXHRDVW8iLCJ4OGIzbG4xazltY2VpczR1MHdoam95cnp2NXFndGFwZjI3Iiw5NywiTlhHdDU9fV1iSWtoKThUPnAtfGVXcyIsInF4bjZpdXAzb3Q4Z3o3ZmxjdzA5YnkiXSxbIml0aGMiLCJCIGMxXHQzRlklPGZfYjJsdV44Wk5DeiNHJ3ZXTTdyJlE9IiwiczN6Ym85YWhnZjdsazV5MGN1bXJwcW53eDZpNGpldnQyIiw1Niwia2AoNTl3ailcIntnPnNvNlRpQXhcbkxQP3FhcHQwXS1JeWUiLCJrNTIzdGxwemVxdnMweWpoODFvZ3VhNnduYnI3YzltZjRpIiw0OSwiaG5bUlhtfERPSC86LkVWS0o7NH1TVSIsIm0wcnlpcXQ4MzYycDFmYXVsajR6Z2giXSxbImlycnIiLCJXMHw3X3p9e3JvWWtoWExeJSgnLz5OdFFHZ3VaU0E0dlUiLCJ2OWFweWlrNjIzMGo1bWw3bjhidXFyZjF6Z3NjZXd4dDQiLDExMSwieWpNRi1mXCJSW1x0SHd4bnMpcElDMT0yNThFOTZQSzpKT1xuIiwiN2d0a3JwYzQ1bndoNmk4amZ2OTNic3lsYXFlem11Mm8xMCIsMTA0LCJtaWxiYCMzQmFxXTtEVFY/ZS48ICZjIiwiMHQ4a2JmMjZ1ejlzbWg3MTRwY2V4eSJdLFsidmtkcyIsIm5TeU5ERydNai9vPFUgbFwiUUVrbWlYMkh7WllKaDQlPV8iLCJ2YnJsNHM3dTlmOG56NWpwcWkwbXd0ZTZjeWhhZzEzb3giLDEwNywiVHNwektWdkwzOSk6UFJhOHg7LnVnKGB0P3ddNkNPZkYxIiwidXNqbDRmaHdicHIzaXl6NXhnODZtOWV2Y243b2swYTIxdCIsNTAsIltcdGUmNUJeVz4wI1xucmJxSTd9LUF8YyIsInV5OG9hMnM2ZzRqMzAxdDliaXA3cmMiXSxbInptcGMiLCJpO1VqJ1s8d1wiRFQwbFpMZ1M4ZiNoeHNNVn10eTpFLSlgIiwiM2M1MWdvcTQwcHphbDlyNnh1dnRrZXkyc3duajdtaWhiIiwxMDIsIms5NllLKHYvJklDbUdCXHQ1YnphP0hjUF8xVyBxUm9BLj1cbiIsIm10ZXFoMHlzNjJwMWZ4ajU4OXJvNGF1bnpsaWczYzd3YmsiLDU2LCJ7ZUYlT1hyUTI+bnAzSk5dNDd1IiwiOWptYW53eXF4MHM1NHp1dG82aCJdLFsiZndiaCIsIng1QThoRTk9XG5RRzFcIkN1SidvVihJKT5sYlc0RCNlIEw2Iiwid3IyNzV5b2dzajRrdjAzaXpjbngxdWFxYjhwZmxtNnRoIiw1NywiMyV0XHR7MnJja2Z5WFJdP05LJi9GZ3c7VFNNbW4tN19pVS4iLCJ5OTNyZnRzN2x4cTh2a2dqZW41bTBpNnd6aGFwMXVjYjJvIiwxMDEsIn1xQjx6YFBaW1lIOjBzanZhT3AiLCI2bTdrd2UzcWFvaHU1ZzRiejhpIl0sWyJxYnV3IiwiaTtVaidbPHdcIkRUMGxaTGdTOGYjaHhzTVZ9dHk6RS0pYCIsIjNjNTFnb3E0MHB6YWw5cjZ4dXZ0a2V5MnN3bmo3bWloYiIsMTAyLCJrOTZZSyh2LyZJQ21HQlx0NWJ6YT9IY1BfMVcgcVJvQS49XG4iLCJtdGVxaDB5czYycDFmeGo1ODlybzRhdW56bGlnM2M3d2JrIiw1Niwie2VGJU9YclEyPm5wM0pOXTQ3dSIsIjlqbWFud3lxeDBzNTR6dXRvNmgiXSxbIm5sb2MiLCJ4PFt5a1klMS1zSzlfQzBSYWojOE9MbF0vSHdocUZVXHQzIiwiMG96dXBrcng2cWp3bnlnbDM0bTdpOXRoMWY4djJiZWM1Iiw5NywiJm0yR1Q1SXJQXCIgLkIobz06aWdiSnBXbno3dGN2TlpgPlxuIiwiNzRoZnZidGNqMmVyb2EwdWw1Nnl3M2lucXhrZ3A5bTF6cyIsMTE1LCJ1VjZ9KVEnP0R7U2VBTVg0O0VmIiwiOTF5c3hlOGx1b3JuNnZwY2l3cSJdLFsia3luYiIsIjBObX11YkM5TDZrezcoXCJueD5zPUtvXUlCdy95U2dmJVciLCJhMjc0YmNsanR2MG9tdzZ6OWc1cDEzdXM4ZWtoeGlyZnEiLDEyMSwiZT9gM0FVPDJaWztcdGlKRUZWJ3xQYThUNWotLnYgOnEjSCkiLCJlb3c1cmZsdXE4eDR6Z2o3MHAxM2NpNm1oMnM5dG5rYWJ2IiwxMTAsIiZYRF9RT2hNcmx0cFIxYzR6R1xuWSIsImM3ODYzcWJzbXd5NTRvdG5oaXYxIl0sWyJ1eXlrIiwiVHg8V3xYdmN1YkN6LWVrVS8gb2lNXHQmOiVJZz4yaHtzWyIsIm1qYjBmZXU2bHp4N2txaGdvcDRhdDgzMWM5Mnl3aXI1biIsMTE4LCI1ZjtWdFwicURMQjkxJ21cbn0/UjZTKFojQWBKcjBIUWxLUCkiLCJxcDVyODQyeWN2eGpvd2Jhejd1aHRzOWdrNmkwZW1uMTNmIiwxMTUsIk5HbkU4YV95LkZqWU89NHczXXA3Iiwia24xZWhvNmZqYnI0MHB4YzlpMnEiXSxbInJ5cGEiLCJCOCAvWTlvXVZIQ19wM3l0XG5oVE9OaTVxNklHLXI9MmclIiwidWwyb3cwMWo5enE1OG1mazRjdjM3YWJzeWlndGVoNnhuIiwxMTIsIm5FZUpLYS46UHtBO3gwVUxcIjQnWEZtfH13ZnZ6USM3WlMoIiwibTg5NjFxd3pnaHUyN3hlb2FwbjNrNWlsdnJmamM0c3l0MCIsMTE0LCImajxSRHNbVz5idWtNYGM/MSlcdGwiLCI2YWt5aG9yODBtMzdzbGZ3MXZ4cCJdLFsiZWhvciIsIlwicTRcbkozZmtaaGombHRgd0g1MFQ9J2d8KEVQW0ItUVlEIiwiN3VpbDVhM2d4YnJwdHZqZXltbzRjMDl3cXpzNjgybmYxIiwxMDcsIjxHY3BPSS9cdHpBWCU2PzlvIHIuYm1GUmllPktzXyl2O1Z1IiwieXB3engydXNtOG9nNXE3NHRhbmxiNnJpM3ZjZWhqOWtmMSIsMTA0LCI3eTp4MjE4XVUjTkN9bldhTVN7TCIsImJqYTN6a2Z2cWx0Z3U1c3c2NzhuIl0sWyJma2FkIiwiN3o+Z317L1cjYGNbWlQmc0k8Mi1oYUtYWVxubyl4U0ZBIiwibml1ZTh0bXlhY2ozbDkxcTY1Znhid3pydjdwbzJnazQwIiwxMTUsIjFFSGIufHU/cChxZlBpdHkncjZPJVx0dz1dOUJKUkQ7OjhrIiwicGhtMjF2OWN3NGI3M3lnbG5meG90YXpzdWo4cXJrNjUwaSIsMTA0LCJRal4gTkNVdjU0bGVcIlZNbV8zMEdMIiwiYml4cXJod245emptNTRvMTJmZTBzIl0sWyJzdm1tIiwibWFHO0ZULmUyY1l6VjolaX0pZzRicC1LVVp5PHdMXG5fPyIsIjFud3NyN3ZrOGZoMGwzdXQ5MmppZ3F4Nno0NWNwYm15byIsOTcsImtyQkp0RChRbHZePiNbaHtYMTlvJlNFQU0vblwiTz0gMDVQIiwiMzZxejBtdjl0bmU3a3dyYTVpMXVqeDI4b3lmc3BjZ2xoNCIsMTAxLCJ8YFx0J1JxajZDTldIXUk4c3g3dTNmIiwid2VneWpwenV4MzhxMmE5dm1pZm90Il0sWyJjb2txIiwiXCIociU5NmpWSzd7a1BcdGdEaE9jRnMnMTtNXCJJdVFaL3lxQVwiIiwiaXp4c29tcWgzcDhidmdhNDl3N2Z5MnRsdWM2ZTVuMDFyIiwxMDYsIl56R1t3bVxuQ2A9OEJ2PjwmXTA6VCBMI3B4M1hsaS1uKS40IiwicDkxdHp4NGlic2h3ZjNxeWVuNTA2dWdvMm1rdjhscmpjNyIsMTA3LCJFWWY/Uk4yYX1XYlU1ZUhffFN0Sm8iLCJzbThma2hyd2E5NHkwZXVwajJucTEiXSxbInpuYmciLCIoXHRFSENfO3MvLldnTmZWbCB6OU1ZaFF9VGo6SkZVUykjIiwibzVoa203OHVwMnl4d3Z6c2owYXQxYmdscjZlaTQzbmNxIiwxMDIsIktaaXteNDxtXCI1J2MlXG5YTHVyeXBxQThbZUl3LURSfGtiQiIsIm91N2VyY3Z3OWwwMXlnaG5maXA2ODVienhxdGFrM3NqbTQiLDU3LCI9NmEwRz5QT28zN252P3gmMWBdMnQiLCJjcnhtamY3eWhndDZvM3A4bDA5aXYiXV0=';
+  // Protocol alphabets observed in css-load.com/loader.min.js (2026-09-07).
+  // Includes prior alphabets for cached/older loaders; these are data, not code.
+  const payloadKeyData = '[["ybfq",";feQX\\\\.Nx<y}2\\nU9bISL/6i!Yu#Ah|C^Z","1kohmv4rl08362aip7fjs5ctbqygzwxne",117,"4WB]3>\\to=nMvcKaw_rVR7zlqm)Fp`:TgO\'","x50w4oe7cjzq8kr6i9aft2p1ngulm3hybv",57,"?-08tP(JH1EG{%[j&s\\" D5k","3bpkimfvxe716nzoyrw0q52"],["nxzn","JKj%IVz[<EH&=FmicuM.:\\tS-xPoZs7\\nkA","o9qzaxtp406wke7ib2g38fymvj5lch1nr",117,"w1Gp>0yB`5Yt\\\\e42]^C3OUXgb n}a\'Tfq{","qgpk375ntl8jw9rmx2i0hc1zuv4oby6sef",115,"N(9|!/_RDv6Q)\\"8?L#hWlr;","ivmslr48ace3zokgxt10b6p"],["kfpv","ra;MH7zfAoQ\\txTUh?n=!NJK9<v`5{#m[3","895t7q1c2vemfuksl60hyzjnwo34bxpgi",97,"y}XW]O&Gl/Ct)sYB8-bF4R\\nD\'pSE0\\\\u.ZP","oilr87t6g1qbz5ef4hvpycujmx3nws02k9",114,"^w V_1qk6:j(\\"g>i%e|L2cI","6nv8cjgzbqs1k49wlx753ae"],["fmjx","XEQ5%<J_h#.0f?veK:{\\tCutj`BP8NGUb)","fu6qr8pikwcnx1astm479bvg2ezlo03hy",106,"sxp2W9 -3OnS&7H=rV4D;T[aw!]MAI/}Ll","4bov28syq7xaceg65fm09rt3lihnkuzjp1",53,"y\\\\6Zg1qm^kzc\'|(YioR\\">F\\n","cq9834khws2tragj7flnymu"],["zmpc",".Ip>szJ8EwahYM/v;yKc=f\\n([_T q3nOS","5nv1iegza269ju8soky04h3p7rltcxmbq",119,"QCABV\\"]#0jb&Wo6t:UuiHg1rPD4%)RlNk-","le4971m5irpukxjv3sq2o8y60gnbzthwfa",102,"G752e`LXx\'Zm}9<\\t{?F","plbi21cxfmo36tn50uq"],["fwbh","x5A8hE9=\\nQG1\\"CuJ\'oV(I)>lbW4D#e L6","wr275yogsj4kv03izcnx1uaqb8pflm6th",57,"3%t\\t{2rckfyXR]?NK&/Fgw;TSMmn-7_iU.","y93rfts7lxq8vkgjen5m0i6wzhap1ucb2o",101,"}qB<z`PZ[YH:0sjvaOp","6m7kwe3qaohu5g4bz8i"],["qbuw","i;Uj\'[<w\\"DT0lZLgS8f#hxsMV}ty:E-)`","3c51goq40pzal9r6xuvtkey2swnj7mihb",102,"k96YK(v/&ICmGB\\t5bza?HcP_1W qRoA.=\\n","mteqh0ys62p1fxj589ro4aunzlig3c7wbk",56,"{eF%OXrQ2>np3JN]47u","9jmanwyqx0s54zuto6h"],["nloc","x<[ykY%1-sK9_C0Raj#8OLl]/HwhqFU\\t3","0ozupkrx6qjwnygl34m7i9th1f8v2bec5",97,"&m2GT5IrP\\" .B(o=:igbJpWnz7tcvNZ`>\\n","74hfvbtcj2eroa0ul56yw3inqxkgp9m1zs",115,"uV6})Q\'?D{SeAMX4;Ef","91ysxe8luorn6vpciwq"],["kynb","0Nm}ubC9L6k{7(\\"nx>s=Ko]IBw/ySgf%W","a274bcljtv0omw6z9g5p13us8ekhxirfq",121,"e?`3AU<2Z[;\\tiJEFV\'|Pa8T5j-.v :q#H)","eow5rfluq8x4zgj70p13ci6mh2s9tnkabv",110,"&XD_QOhMrltpR1c4zG\\nY","c7863qbsmwy54otnhiv1"],["uyyk","Tx<W|XvcubCz-ekU/ oiM\\t&:%Ig>2h{s[","mjb0feu6lzx7kqhgop4at831c92ywir5n",118,"5f;Vt\\"qDLB91\'m\\n}?R6S(Z#A`Jr0HQlKP)","qp5r842ycvxjowbaz7uhts9gk6i0emn13f",115,"NGnE8a_y.FjYO=4w3]p7","kn1eho6fjbr40pxc9i2q"],["rypa","B8 /Y9o]VHC_p3yt\\nhTONi5q6IG-r=2g%","ul2ow01j9zq58mfk4cv37absyigteh6xn",112,"nEeJKa.:P{A;x0UL\\"4\'XFm|}wfvzQ#7ZS(","m8961qwzghu27xeoapn3k5ilvrfjc4syt0",114,"&j<RDs[W>bukM`c?1)\\tl","6akyhor80m37slfw1vxp"],["ehor","\\"q4\\nJ3fkZhj&lt`wH50T=\'g|(EP[B-QYD","7uil5a3gxbrptvjeymo4c09wqzs682nf1",107,"<GcpOI/\\tzAX%6?9o r.bmFRie>Ks_)v;Vu","ypwzx2usm8og5q74tanlb6ri3vcehj9kf1",104,"7y:x218]U#NC}nWaMS{L","bja3zkfvqltgu5sw678n"],["fkad","7z>g}{/W#`c[ZT&sI<2-haKXYn\\no)xSFA","niue8tmyacj3l91q65fxbwzrv7po2gk40",115,"1EHb.|u?p(qfPity\'r6O%\\tw=]9BJRD;:8k","phm21v9cw4b73yglnfxotazsuj8qrk650i",104,"Qj^ NCUv54le\\"VMm_30GL","bixqrhwn9zjm54o12fe0s"],["svmm","maG;FT.e2cYzV:%i})g4bp-KUZy<wL\\n_?","1nwsr7vk8fh0l3ut92jigqx6z45cpbmyo",97,"krBJtD(Qlv^>#[h{X19o&SEAM/n\\"O= 05P","36qz0mv9tne7kwra5i1ujx28oyfspcglh4",101,"|`\\t\'Rqj6CNWH]I8sx7u3f","wegyjpzux38q2a9vmifot"],["cokq","(r%96jVK7{kP\\tgDhOcFs\'1;M\\"IuQZ/yqA","izxsomqh3p8bvga49w7fy2tluc6e5n01r",106,"^zG[wm\\nC`=8Bv><&]0:T L#px3Xli-n).4","p91tzx4ibshwf3qyen506ugo2mkv8lrjc7",107,"EYf?RN2a}WbU5eH_|StJo","sm8fkhrwa94y0eupj2nq1"],["znbg","(\\tEHC_;s/.WgNfVl z9MYhQ}Tj:JFUS)#","o5hkm78up2yxwvzsj0at1bglr6ei43ncq",102,"KZi{^4<m\\"5\'c%\\nXLurypqA8[eIw-DR|kbB","ou7ercvw9l01yghnfip685bzxqtak3sjm4",57,"=6a0G>POo37nv?x&1`]2t","crxmjf7yhgt6o3p8l09iv"],["dggn","_l< VzqDF:2g61w{im(\\"7LAZa/^j%\\\\\'K?","x29hb8pwvsilcmq065t437rnyuo1jfzke",103,"`H;4SyMB.\\nfuxnv#RrP3EJQ&9Y[O0c\\tCUo","x8b3ln1k9mceis4u0whjoyrzv5qgtapf27",97,"NXGt5=}]bIkh)8T>p-|eWs","qxn6iup3ot8gz7flcw09by"],["ithc","B c1\\t3FY%<f_b2lu^8ZNCz#G\'vWM7r&Q=","s3zbo9ahgf7lk5y0cumrpqnwx6i4jevt2",56,"k`(59wj)\\"{g>s\\\\o6TiAx\\nLP?qapt0]-Iye","k523tlpzeqvs0yjh81ogua6wnbr7c9mf4i",49,"hn[RXm|DOH/:.EVKJ;4}SU","m0ryiqt8362p1faulj4zgh"],["irrr","W0|7_z}{roYkhXL^%(\'/>NtQGguZSA4vU","v9apyik6230j5ml7n8buqrf1zgscewxt4",111,"\\\\yjMF-f\\"R[\\tHwxns)pIC1=258E96PK:JO\\n","7gtkrpc45nwh6i8jfv93bsylaqezmu2o10",104,"milb`#3Baq];DTV?e.< &c","0t8kbf26uz9smh714pcexy"],["vkds","nSyNDG\'Mj/o<U l\\"QEkmiX2H{ZYJh4%=_","vbrl4s7u9f8nz5jpqi0mwte6cyhag13ox",107,"TspzK\\\\VvL39):PRa8x;.ug(`t?w]6COfF1","usjl4fhwbpr3iyz5xg86m9evcn7ok0a21t",50,"[\\te&5B^W>0#\\nrbqI7}-A|c","uy8oa2s6g4j301t9bip7rc"],["qwhv","gyomflpka1er24wxtbiunvqsc65j03zh","c0sjxz1bveng96a43mf57l8tqo2uwkri",121,"d:K.FC=+9E?H_A87Q/JRPLS%GDBTOI#-N&M","7xhrjocb64na0mfk9wvu1y8zsl2gt3qi5ep",112,"}]~\\r^W{Z (\\\\\\",U$`|\'>![\\nV@Y)<\\tX;","1wbtrai6j04gz3x2elo9kpyfvmqhs57cu8n","h","c0sjxz1bveng96a43mf57l8tqo2uwkriyph"],["cqws","p0syqrx65vc2fztb13monui4jwealkhg","b27pfnm1ciogurazketl50vw69843xsy",106,"GQ:%8L+#R/FCBTE7&SK9D-.=_O?IHMJNAPd","0tfe9hr5unw6zjblq7c8pi41vs23kyomgax",113,"ZV (^~!\\\\\\n,Y\\r`@X)W;}[\'<U]\\t>|{\\"$","leouj02azvi93cypxh4tq5wrksn81fb76gm","h","b27pfnm1ciogurazketl50vw69843xsyjqh"],["qibj","tl4z5bsai10yxf3khegjqurwomvnp6c2","yncjz492bt61aril30fuxqopwmshk5v7",56,"T.&KdR%M7=EQL_N?-:GSC+AJDPBHO/F89#I","8hgjbu2wk7npr96fye3tixol1sa50zmvqc4",101,"XU~\\\\>\\n|](Y{ W}<^)V[\\r@\'$\\"\\t!;,Z`","znwiehso6vbyr4px109m3fqcla52t8uk7jg","g","yncjz492bt61aril30fuxqopwmshk5v78eg"],["wzlc","azm5keyrtw6jnlv0busho3gc4i1x2qpf","n3etr146mbhay28psqz5lifuv7xj0kco",57,"QF8LP9CA:#MK&?/OHI-_.GSR+7ND=J%EdBT","f3tmoshwzp2ic15j9kxb8qlay60gerv47nu",103,"|{[W~ZXU>\\t}\\n(\', ]<!`$^@Y\\r\\"\\\\;)V","tbj7ocgxmypwr84laku3e1in59hv20fqzs6","w","n3etr146mbhay28psqz5lifuv7xj0kco9gw"],["mntv","wbjth54kcnelz1ir3yfapu0xvom6s2qg","hoe9xzy7miacf3548wbnj2rsquk06l1v",103,":?NJFR-7SMPGH8ACI_BL&./dT9ED#O%=KQ+","s023r947bvjlpwigmqu8n5oc1hafkexy6tz",112,"^(Z{\\r];[\\\\\\t \'X~@<YU)`V,W}\\"\\n|>$!","9ezs0ty1mgpixuahrn8of6c4vbkw5ql2j73","t","hoe9xzy7miacf3548wbnj2rsquk06l1vgpt"],["ejhe","rvtwqhucnlg6myso0iz1524k3exjabfp","36jh0bgspxzvakfi8mun1q5t9c72ye4o",114,"-+.T?PL/#7S_DA:%BMJ=d&HNG8QR9FKOICE","c3vxq4i8bp9gwrzfmsok02y67tj5l1nhaeu",119,"^\'(\\n}V[W);`|@$\\t>\\\\<\\"U,~XY!{Z]\\r ","fqoitcks5017l248hxg3bnzapv9jmw6eury","l","36jh0bgspxzvakfi8mun1q5t9c72ye4orwl"],["pqaq","hq5pfbv4jyzs60enacx23guorwkmlt1i","jun6qfv89oblmpy432g5etxa1s7zhckr",105,"FE/8P?HMR:9LTGOB7D%S.KJ_A&-=+N#CdIQ","jlt5n7yz43hqiog6uefmxbcwas201pr9vk8",119,"@,`W)!\\\\{Z<V;\\"^~] U$>X\'Y}\\t|[\\r(\\n","5xq68o7lj1cvu3ngpbr4f2stmih0yw9kzae","0","jun6qfv89oblmpy432g5etxa1s7zhckriw0"],["yjvs","0lbzcekgayfs34orxmiw16qupjnhtv25","6npxfy8ize4ksrb3v5wugm9oq1thcj02",55,"SLH&:N#BP=d9%./?7+J8RCMDGA_FETKQOI-","f35krahqvgt6zjpen71cl92oxu4bims8y0w",97,"{[~U; \\\\Y!@$\\tZW]\\r>(\'}\\",XV^`)<\\n|","mfihxog921c8k3be7p60y5zwan4rqsjltvu","l","6npxfy8ize4ksrb3v5wugm9oq1thcj027al"],["dggn","_l< VzqDF:2g61w{im(\\"7LAZa/^j%\'K?","x29hb8pwvsilcmq065t437rnyuo1jfzke",103,"`H;4SyMB.\\nfuxnv#RrP3EJQ&9Y[O0c\\tCUo","x8b3ln1k9mceis4u0whjoyrzv5qgtapf27",97,"NXGt5=}]bIkh)8T>p-|eWs","qxn6iup3ot8gz7flcw09by"],["ithc","B c1\\t3FY%<f_b2lu^8ZNCz#G\'vWM7r&Q=","s3zbo9ahgf7lk5y0cumrpqnwx6i4jevt2",56,"k`(59wj)\\"{g>so6TiAx\\nLP?qapt0]-Iye","k523tlpzeqvs0yjh81ogua6wnbr7c9mf4i",49,"hn[RXm|DOH/:.EVKJ;4}SU","m0ryiqt8362p1faulj4zgh"],["irrr","W0|7_z}{roYkhXL^%(\'/>NtQGguZSA4vU","v9apyik6230j5ml7n8buqrf1zgscewxt4",111,"yjMF-f\\"R[\\tHwxns)pIC1=258E96PK:JO\\n","7gtkrpc45nwh6i8jfv93bsylaqezmu2o10",104,"milb`#3Baq];DTV?e.< &c","0t8kbf26uz9smh714pcexy"],["vkds","nSyNDG\'Mj/o<U l\\"QEkmiX2H{ZYJh4%=_","vbrl4s7u9f8nz5jpqi0mwte6cyhag13ox",107,"TspzKVvL39):PRa8x;.ug(`t?w]6COfF1","usjl4fhwbpr3iyz5xg86m9evcn7ok0a21t",50,"[\\te&5B^W>0#\\nrbqI7}-A|c","uy8oa2s6g4j301t9bip7rc"],["zmpc","i;Uj\'[<w\\"DT0lZLgS8f#hxsMV}ty:E-)`","3c51goq40pzal9r6xuvtkey2swnj7mihb",102,"k96YK(v/&ICmGB\\t5bza?HcP_1W qRoA.=\\n","mteqh0ys62p1fxj589ro4aunzlig3c7wbk",56,"{eF%OXrQ2>np3JN]47u","9jmanwyqx0s54zuto6h"],["fkad","7z>g}{/W#`c[ZT&sI<2-haKXY\\no)xSFA","niue8tmyacj3l91q65fxbwzrv7po2gk40",115,"1EHb.|u?p(qfPity\'r6O%\\tw=]9BJRD;:8k","phm21v9cw4b73yglnfxotazsuj8qrk650i",104,"Qj^ NCUv54le\\"VMm_30GL","bixqrhwn9zjm54o12fe0s"],["cokq","\\"(r%96jVK7{kP\\tgDhOcFs\'1;M\\"IuQZ/yqA\\"","izxsomqh3p8bvga49w7fy2tluc6e5n01r",106,"^zG[wm\\nC`=8Bv><&]0:T L#px3Xli-n).4","p91tzx4ibshwf3qyen506ugo2mkv8lrjc7",107,"EYf?RN2a}WbU5eH_|StJo","sm8fkhrwa94y0eupj2nq1"]]';
 
   function attribute(node, name) {
     try {
@@ -64,74 +68,86 @@
 
   function decodePayload(payload) {
     try {
-      payloadKeys ??= W.JSON.parse(W.atob(payloadKeyData));
-      let key;
-      for (const candidate of payloadKeys) {
-        if (candidate[0] === payload.slice(0, 4)) {
-          key = candidate;
-          break;
+      payloadKeys ??= W.JSON.parse(payloadKeyData);
+      const prefix = payload.slice(0, 4);
+      let tables = decodingTables.get(prefix);
+      if (!tables) {
+        tables = [];
+        for (const key of payloadKeys) {
+          if (key[0] !== prefix) {
+            continue;
+          }
+          const groups = [W.Object.create(null), W.Object.create(null), W.Object.create(null)];
+          for (let group = 0; group < 3; group++) {
+            const input = key[group * 3 + 1];
+            const output = key[group * 3 + 2];
+            for (let index = 0; index < output.length; index++) {
+              groups[group][output[index]] = input[index];
+            }
+          }
+          tables.push({ groups, markers: [W.String.fromCharCode(key[3]), W.String.fromCharCode(key[6])], byte: key[9], alphabet: key[10] });
+        }
+        decodingTables.set(prefix, tables);
+      }
+      for (const table of tables) {
+        try {
+          let decoded = '';
+          for (let index = 4; index < payload.length; index++) {
+            const character = payload[index];
+            if (character === table.byte) {
+              const bytes = [];
+              while (payload[index] === table.byte) {
+                const high = table.alphabet.indexOf(payload[index + 1]);
+                const low = table.alphabet.indexOf(payload[index + 2]);
+                const byte = high * table.alphabet.length + low;
+                if (high < 0 || low < 0 || byte > 255) {
+                  throw new W.Error();
+                }
+                bytes.push(byte);
+                index += 3;
+              }
+              decoded += new W.TextDecoder().decode(new W.Uint8Array(bytes));
+              index--;
+              continue;
+            }
+            const group = table.markers.indexOf(character) + 1;
+            if (!group) {
+              decoded += table.groups[0][character] ?? character;
+            } else if (++index < payload.length) {
+              const escaped = payload[index];
+              decoded += table.groups[group][escaped] ?? (table.groups[0][escaped] ?? escaped) + escaped;
+            }
+          }
+          return W.JSON.parse(decoded);
+        } catch {
+          // The same prefix has shipped with different alphabets.
         }
       }
-      if (!key) {
-        return [];
-      }
-      const unwrap = (input, output, character) => {
-        const index = output.indexOf(character);
-        return index < 0 ? character : input[index];
-      };
-      let decoded = '';
-      let mode = 0;
-      for (const character of payload.slice(4)) {
-        if (!mode && character === W.String.fromCharCode(key[3])) {
-          mode = 1;
-          continue;
-        }
-        if (!mode && character === W.String.fromCharCode(key[6])) {
-          mode = 2;
-          continue;
-        }
-        if (mode === 1) {
-          mode = 0;
-          decoded += key[5].includes(character)
-            ? unwrap(key[4], key[5], character)
-            : unwrap(key[1], key[2], character) + character;
-          continue;
-        }
-        if (mode === 2) {
-          mode = 0;
-          decoded += key[8].includes(character)
-            ? unwrap(key[7], key[8], character)
-            : unwrap(key[1], key[2], character) + character;
-          continue;
-        }
-        decoded += unwrap(key[1], key[2], character);
-      }
-      return W.JSON.parse(decoded);
     } catch {
-      return [];
+      // Malformed data must not interrupt the page's native DOM operation.
     }
+    return [];
   }
 
   function extractToken(source) {
-    const fragments = [];
     const pattern = /(['"])([A-Za-z0-9_.-]{4,})\1/g;
+    let token = '';
+    let fragments = 0;
     let match;
     while ((match = pattern.exec(source)) !== null) {
-      fragments.push(match[2]);
-    }
-    for (let start = 0; start < fragments.length; start++) {
-      if (!fragments[start].startsWith('eyJ')) {
-        continue;
+      const fragment = match[2];
+      if (fragment.startsWith('eyJ')) {
+        token = fragment;
+        fragments = 1;
+      } else if (token) {
+        token += fragment;
+        fragments++;
       }
-      let token = '';
-      for (let index = start; index < Math.min(start + 20, fragments.length); index++) {
-        token += fragments[index];
-        if (test(jwtPattern, token)) {
-          return token;
-        }
-        if (token.length > 2_048) {
-          break;
-        }
+      if (test(jwtPattern, token)) {
+        return token;
+      }
+      if (fragments >= 20 || token.length > 2_048) {
+        token = '';
       }
     }
     return '';
@@ -140,16 +156,21 @@
   function loaderUrls(node) {
     const urls = new W.Set();
     try {
-      const source = new W.URL(attribute(node, 'src') || node.src, W.location?.href);
+      const source = new W.URL(attribute(node, 'data-src') || attribute(node, 'src') || node.src, W.location?.href);
+      if (!test(adShieldHostPattern, source.hostname)) {
+        return [];
+      }
       urls.add(source.href);
       const hostPattern = /['"]([a-z0-9.-]+\.[a-z]{2,})['"]/gi;
       const handler = attribute(node, 'onerror');
       let match;
       while ((match = hostPattern.exec(handler)) !== null) {
-        urls.add(`https://${match[1]}${source.pathname}`);
+        if (test(adShieldHostPattern, match[1])) {
+          urls.add(`https://${match[1]}${source.pathname}${source.search}`);
+        }
       }
       for (const host of ['css-load.com', 'html-load.com', 'content-loader.com']) {
-        urls.add(`https://${host}${source.pathname}`);
+        urls.add(`https://${host}${source.pathname}${source.search}`);
       }
     } catch {
       // Invalid script URLs cannot provide recovery resources.
@@ -158,19 +179,25 @@
   }
 
   async function fetchText(url) {
-    const response = await apply(originalFetch, W, [url, {
-      cache: 'no-cache',
-      credentials: 'omit',
-      referrerPolicy: 'no-referrer',
-    }]);
-    if (!response?.ok) {
-      throw new W.Error();
+    const controller = new W.AbortController();
+    const timeout = apply(originalSetTimeout, W, [() => controller.abort(), 5_000]);
+    try {
+      const response = await apply(originalFetch, W, [url, {
+        signal: controller.signal,
+        cache: 'no-cache',
+        credentials: 'omit',
+        referrerPolicy: 'no-referrer',
+      }]);
+      if (!response?.ok) {
+        throw new W.Error();
+      }
+      return await response.text();
+    } finally {
+      apply(originalClearTimeout, W, [timeout]);
     }
-    return response.text();
   }
 
-  async function findToken(node) {
-    const urls = loaderUrls(node);
+  async function findToken(urls) {
     for (const url of urls) {
       try {
         const token = extractToken(await fetchText(url));
@@ -188,33 +215,58 @@
     return undefined;
   }
 
-  function injectStyle(css, id) {
-    if (!css.trim() || recoveredStyles.has(id)) {
-      return false;
+  function accessFor(node) {
+    const urls = loaderUrls(node);
+    if (!urls.length) {
+      return W.Promise.resolve();
     }
-    const parent = W.document?.head || W.document?.documentElement;
-    if (!parent || typeof W.document?.createElement !== 'function') {
+    const key = urls.join('\n');
+    if (!loaderAccess.has(key)) {
+      const request = findToken(urls);
+      loaderAccess.set(key, request);
+      request.then((access) => {
+        if (!access) {
+          loaderAccess.delete(key);
+        }
+      });
+    }
+    return loaderAccess.get(key);
+  }
+
+  function injectStyle(css, id, node, media = '') {
+    if (!css.trim() || recoveredStyles.has(id)) {
+      return true;
+    }
+    const parent = document?.head || document?.documentElement;
+    if (!parent || typeof document?.createElement !== 'function') {
       return;
     }
-    const style = W.document.createElement('style');
+    const style = document.createElement('style');
     style.setAttribute('data-adshield-defense', 'recovered');
+    style.nonce = node.nonce || '';
+    style.media = media;
     style.textContent = css;
     parent.appendChild(style);
     recoveredStyles.add(id);
     return true;
   }
 
-  function loadStylesheet(url, id) {
+  function loadStylesheet(url, id, node, media = '') {
     if (recoveredStyles.has(id)) {
       return W.Promise.resolve(true);
     }
-    const parent = W.document?.head || W.document?.documentElement;
-    if (!parent || typeof W.document?.createElement !== 'function') {
+    const parent = document?.head || document?.documentElement;
+    if (!parent || typeof document?.createElement !== 'function') {
       return W.Promise.resolve(false);
     }
-    return new W.Promise((resolve) => {
-      const link = W.document.createElement('link');
+    if (pendingStyles.has(id)) {
+      return pendingStyles.get(id);
+    }
+    const request = new W.Promise((resolve) => {
+      let timeout;
+      const link = document.createElement('link');
       const finish = (loaded) => {
+        apply(originalClearTimeout, W, [timeout]);
         link.onload = null;
         link.onerror = null;
         if (loaded) {
@@ -228,77 +280,113 @@
         }
         resolve(loaded);
       };
+      link.nonce = node.nonce || '';
+      link.media = media;
       link.rel = 'stylesheet';
       link.href = url;
       link.referrerPolicy = 'no-referrer';
       link.setAttribute('data-adshield-defense', 'recovered');
       link.onload = () => finish(true);
       link.onerror = () => finish(false);
+      timeout = apply(originalSetTimeout, W, [() => finish(false), 5_000]);
       try {
         parent.appendChild(link);
       } catch {
         finish(false);
       }
     });
+    pendingStyles.set(id, request);
+    request.then(() => pendingStyles.delete(id));
+    return request;
   }
 
-  async function restoreStyles(node, payload) {
-    const entries = payload.startsWith('<') ? [{ tags: payload }] : decodePayload(payload);
+  async function restoreStyles(node, payload, encoded) {
+    const entries = encoded ? [{ tags: W.atob(payload) }]
+      : payload.startsWith('<') ? [{ tags: payload }] : decodePayload(payload);
     if (!isArray(entries)) {
       return false;
     }
-    const resources = [];
-    let restored = false;
-    for (const [index, entry] of entries.entries()) {
+    const styles = [];
+    for (const entry of entries) {
       if (typeof entry?.stylesheet === 'string') {
-        restored = injectStyle(entry.stylesheet, `${payload}:${index}`) || restored;
+        styles.push({ css: entry.stylesheet, media: '' });
       }
       if (typeof entry?.tags !== 'string') {
         continue;
       }
-      const stylePattern = /<style[^>]*>([\s\S]*?)<\/style>/gi;
-      let match;
-      while ((match = stylePattern.exec(entry.tags)) !== null) {
-        restored = injectStyle(match[1], `${payload}:style:${index}`) || restored;
+      // A template parses attributes/entities without running scripts or loading images.
+      const template = document.createElement('template');
+      template.innerHTML = entry.tags;
+      for (const element of template.content.querySelectorAll('style,link')) {
+        const media = attribute(element, 'media');
+        if (element.tagName === 'STYLE') {
+          styles.push({ css: element.textContent, media });
+        } else if (attribute(element, 'rel').toLowerCase().split(/\s+/).includes('stylesheet')) {
+          styles.push({ href: attribute(element, 'href'), media });
+        }
       }
-      const resourcePattern = /resources(-v2)?:\/\/([A-Za-z0-9._/-]+)/g;
-      while ((match = resourcePattern.exec(entry.tags)) !== null) {
-        resources.push({ id: match[2], version: match[1] ? 2 : 1 });
-      }
     }
-    if (!resources.length || typeof originalFetch !== 'function') {
-      return restored;
-    }
-    const access = await findToken(node);
-    if (!access) {
-      return restored;
-    }
-    for (const resource of resources) {
-      if (recoveredStyles.has(resource.id)) {
+    let complete = styles.length > 0;
+    let access;
+    for (const [index, style] of styles.entries()) {
+      if (style.css !== undefined) {
+        complete = injectStyle(style.css, `${payload}:${index}`, node, style.media) && complete;
         continue;
       }
-      for (const origin of access.origins) {
-        const path = resource.version === 2 ? 'resources/v2' : 'resources';
-        let url = `${origin}/${path}/${resource.id}?token=${W.encodeURIComponent(access.token)}`;
-        if (resource.version === 2) {
-          url += `&host=${W.encodeURIComponent(W.location.host)}`;
+      const resource = /^resources(-v2)?:\/\/([A-Za-z0-9._/-]+)$/.exec(style.href);
+      const urls = [];
+      let id;
+      if (resource && !resource[2].split('/').includes('..')) {
+        const version = resource[1] ? 2 : 1;
+        id = `${version}:${resource[2]}:${style.media}`;
+        if (recoveredStyles.has(id)) {
+          continue;
         }
-        if (await loadStylesheet(url, resource.id)) {
-          restored = true;
+        if (typeof originalFetch === 'function') {
+          access ??= await accessFor(node);
+        }
+        if (access) {
+          for (const origin of access.origins) {
+            const path = version === 2 ? 'resources/v2' : 'resources';
+            let url = `${origin}/${path}/${resource[2]}?token=${W.encodeURIComponent(access.token)}`;
+            if (version === 2) {
+              url += `&host=${W.encodeURIComponent(W.location.host)}`;
+            }
+            urls.push(url);
+          }
+        }
+      } else {
+        try {
+          const url = new W.URL(style.href, document.baseURI || W.location?.href);
+          if (style.href && (url.protocol === 'https:' || url.protocol === 'http:')) {
+            urls.push(url.href);
+            id = url.href + ':' + style.media;
+          }
+        } catch {
+          // Ignore invalid and non-HTTP stylesheet URLs.
+        }
+      }
+      let loaded = false;
+      for (const url of urls) {
+        if (await loadStylesheet(url, id, node, style.media)) {
+          loaded = true;
           break;
         }
       }
+      complete = loaded && complete;
     }
-    return restored;
+    return complete;
   }
 
   function recoverStyles(node) {
-    const payload = attribute(node, 'data') || attribute(node, 'wp-data');
+    const data = attribute(node, 'data');
+    const payload = data || attribute(node, 'wp-data') || attribute(node, 'data-resource');
     if (!payload || styleRecoveries.has(payload)) {
       return;
     }
-    const recovery = restoreStyles(node, payload);
-    styleRecoveries.set(payload, recovery);
+    // Reserve before style insertion can synchronously re-enter a DOM hook.
+    styleRecoveries.set(payload, true);
+    const recovery = restoreStyles(node, payload, !data);
     recovery.then((restored) => {
       if (!restored) {
         styleRecoveries.delete(payload);
@@ -327,7 +415,7 @@
         return false;
       }
       const src = attribute(node, 'src') || node.src;
-      if (isAdShieldUrl(src)) {
+      if (isAdShieldUrl(src) || isAdShieldUrl(attribute(node, 'data-src'))) {
         return true;
       }
       if (node.tagName === 'IFRAME') {
@@ -351,18 +439,30 @@
   }
 
   function startRecoveryObserver() {
-    if (recoveryObserver || typeof W.MutationObserver !== 'function' || !W.document) {
+    if (recoveryObserver || typeof W.MutationObserver !== 'function' || !document) {
       return;
     }
     try {
       recoveryObserver = new W.MutationObserver((mutations) => {
+        const roots = new W.Set();
         for (const mutation of mutations) {
           for (const node of mutation.addedNodes) {
-            recoverAdShieldTree(node);
+            if (!node.nodeType || node.nodeType === 1) {
+              roots.add(node);
+            }
+          }
+        }
+        for (const root of roots) {
+          let parent = root.parentNode;
+          while (parent && !roots.has(parent)) {
+            parent = parent.parentNode;
+          }
+          if (!parent) {
+            recoverAdShieldTree(root);
           }
         }
       });
-      recoveryObserver.observe(W.document, { childList: true, subtree: true });
+      recoveryObserver.observe(document, { childList: true, subtree: true });
     } catch {
       recoveryObserver = undefined;
     }
@@ -373,13 +473,28 @@
     startRecoveryObserver();
   }
 
-  function recoverAdShieldNode(node) {
+  function recoverAdShieldNode(node, beforeInsertion) {
     markDetected();
     if (node.tagName === 'SCRIPT') {
       recoverStyles(node);
+      node.type = 'application/x-adshield-blocked';
+      node.removeAttribute?.('onerror');
+      node.removeAttribute?.('onload');
       return;
     }
-    if (node.tagName !== 'IFRAME' || !node.parentNode) {
+    if (node.tagName !== 'IFRAME') {
+      return;
+    }
+    node.removeAttribute?.('onload');
+    node.removeAttribute?.('onerror');
+    node.removeAttribute?.('srcdoc');
+    node.setAttribute('src', 'about:blank');
+    if (beforeInsertion || !node.parentNode) {
+      W.Promise.resolve().then(() => {
+        if (node.parentNode) {
+          apply(originalRemoveChild, node.parentNode, [node]);
+        }
+      }).catch(() => {});
       return;
     }
     try {
@@ -393,18 +508,21 @@
     }
   }
 
-  function recoverAdShieldTree(root) {
-    if (!root) {
+  function recoverAdShieldTree(root, beforeInsertion = false) {
+    if (!root || (root.nodeType && root.nodeType !== 1 && root.nodeType !== 9 && root.nodeType !== 11)) {
       return;
     }
     if (isAdShieldNode(root)) {
-      recoverAdShieldNode(root);
+      recoverAdShieldNode(root, beforeInsertion);
+      return;
+    }
+    if (root.childElementCount === 0 || typeof root.querySelectorAll !== 'function') {
       return;
     }
     try {
       for (const node of root.querySelectorAll('script,iframe')) {
         if (isAdShieldNode(node)) {
-          recoverAdShieldNode(node);
+          recoverAdShieldNode(node, beforeInsertion);
         }
       }
     } catch {
@@ -426,235 +544,178 @@
       || (value.includes('애드블록') && value.includes('로드'));
   }
 
-  if (W.Node?.prototype) {
-    for (const key of ['appendChild', 'insertBefore', 'replaceChild']) {
-      if (typeof W.Node.prototype[key] !== 'function') {
-        continue;
+  // Only inspect immutable function source once; never cache mutable inventory objects.
+  function kindOf(fn) {
+    let kind = functionKinds.get(fn);
+    if (kind !== undefined) {
+      return kind;
+    }
+    const source = sourceOf(fn);
+    kind = 0;
+    if (source.includes('inventoryId')
+      && test(/\binventoryId['"]?\s*:\s*this\s*\[/, source)
+      && test(/\breturn\s+[$\w]+\s*\(\s*\{/, source)
+      && test(/,\s*\.\.\.\s*[$\w]+\s*\[/, source)) {
+      kind = 1;
+    } else if (source.includes('report.error-report.com/')
+      && source.includes('setAttribute') && source.includes('onload')
+      && source.includes('fetch') && source.includes('remove')) {
+      kind = 2;
+    }
+    apply(weakSet, functionKinds, [fn, kind]);
+    return kind;
+  }
+
+  function currentLoader() {
+    const node = document?.currentScript;
+    return node && isAdShieldNode(node) ? node : undefined;
+  }
+
+  function stopCurrentLoader() {
+    const node = currentLoader();
+    if (node) {
+      recoverStyles(node);
+      abortAdShield();
+    }
+  }
+
+  // Ad-Shield's impression records carry slash-separated frame identifiers.
+  // Read data descriptors so normal WeakMap keys do not execute page getters.
+  function hasAdShieldImpression(value) {
+    if (!value || typeof value !== 'object') {
+      return false;
+    }
+    try {
+      const impressions = descriptor(value, 'imp');
+      if (!impressions?.enumerable || !isArray(impressions.value)) {
+        return false;
       }
-      wrap(W.Node.prototype, key, (target, thisArg, args) => {
-        if (isAdShieldNode(args[0])) {
-          recoverAdShieldNode(args[0]);
-          if (args[0].tagName === 'IFRAME') {
-            return key === 'replaceChild' ? args[1] : args[0];
+      let fields = 0;
+      for (const name of ['device', 'id', 'regs', 'site', 'source']) {
+        if (descriptor(value, name)?.enumerable) {
+          fields++;
+        }
+      }
+      if (fields < 4) {
+        return false;
+      }
+      // ponytail: cap impression inspection at 1,000 entries / 10,000 keys;
+      // use loader-origin detection for larger or differently shaped payloads.
+      const items = impressions.value;
+      let remaining = 10_000;
+      for (let index = 0; index < Math.min(items.length, 1_000); index++) {
+        const item = descriptor(items, index)?.value;
+        if (!item || typeof item !== 'object') {
+          continue;
+        }
+        for (const name in item) {
+          if (--remaining < 0) {
+            return false;
+          }
+          if (!name.includes('_slot') || !descriptor(item, name)?.enumerable) {
+            continue;
+          }
+          const parts = name.split('/');
+          if (parts.length === 5 && test(/^\d+$/, parts[0])
+            && test(/^[\w]+_slot\d+_+$/, parts[4])
+            && parts[1] && parts[2] && parts[3]) {
+            return true;
           }
         }
-        return apply(target, thisArg, args);
+      }
+    } catch {
+      // Proxies may reject introspection; let native WeakMap.set handle them.
+    }
+    return false;
+  }
+
+  if (W.Node?.prototype) {
+    for (const key of ['appendChild', 'insertBefore', 'replaceChild']) {
+      install(W.Node.prototype, key, (args) => {
+        const node = args[0];
+        if (!node || (node.nodeType && node.nodeType !== 1 && node.nodeType !== 11)) {
+          return;
+        }
+        if (node?.tagName === 'SCRIPT') {
+          // Includes the loader's inline prehook and blob-based recovery scripts.
+          stopCurrentLoader();
+        }
+        recoverAdShieldTree(node, true);
       });
     }
   }
 
   for (const key of ['alert', 'confirm']) {
-    if (typeof W[key] !== 'function') {
-      continue;
-    }
-    wrap(W, key, (target, thisArg, args) => {
+    install(W, key, (args) => {
       if (isAdShieldMessage(args[0])) {
         abortAdShield();
       }
-      return apply(target, thisArg, args);
     });
   }
 
-  const toStringProxy = new W.Proxy(functionToString, {
-    apply(target, thisArg, args) {
-      return nativeSources.get(thisArg) ?? apply(target, thisArg, args);
+  install(W.Map.prototype, 'get', (args) => {
+    if (typeof args[0] === 'function' && kindOf(args[0])) {
+      abortAdShield();
+    }
+  });
+  install(W.Map.prototype, 'set', (args) => {
+    const [key, value] = args;
+    if (typeof key !== 'string') {
+      return;
+    }
+    const inventory = key === 'inventory_id' ? value
+      : key.startsWith('inventory_id,') ? key.slice(13) : undefined;
+    if ((typeof inventory === 'string' && test(/^[\w-]+\/[\w]+\/[\w]+$/, inventory))
+      || (typeof value === 'function' && kindOf(value) === 2)) {
+      abortAdShield();
+    }
+  });
+  install(W.WeakMap.prototype, 'set', (args) => {
+    if (hasAdShieldImpression(args[0])) {
+      abortAdShield();
+    }
+  });
+
+  // Timer syntax alone is shared by ordinary async application code.
+  // Attribute scheduling to the executing loader instead of guessing from its body.
+  for (const key of ['setTimeout', 'setInterval']) {
+    install(W, key, stopCurrentLoader);
+  }
+
+  const toString = new W.Proxy(functionToString, {
+    apply(target, receiver, args) {
+      return apply(target, originals.get(receiver) ?? receiver, args);
     },
   });
-  nativeSources.set(toStringProxy, sourceOf(functionToString));
-  W.Function.prototype.toString = toStringProxy;
-  restoreCallbacks.push(() => {
-    if (W.Function.prototype.toString === toStringProxy) {
-      W.Function.prototype.toString = functionToString;
-    }
-  });
-
-  const initPatterns = [
-    /[a-zA-Z0-9]+ *=> *{ *const *[a-zA-Z0-9]+ *= *[a-zA-Z0-9]+ *; *if/,
-    /===? *[a-zA-Z0-9]+ *\[ *[a-zA-Z0-9]+\( *[0-9a-z]+ *\) *\] *\) *return *[a-zA-Z0-9]+ *\( *{ *('|\")?inventoryId('|\")? *:/,
-    /{ *('|\")?inventoryId('|\")? *: *this *\[[a-zA-Z0-9]+ *\( *[0-9a-z]+ *\) *\] *, *\.\.\. *[a-zA-Z0-9]+ *\[ *[a-zA-Z0-9]+ *\( *[0-9a-z]+ *\) *\] *} *\)/,
-  ];
-
-  function isInitFunction(text) {
-    if (!text.includes('inventoryId')) {
-      return false;
-    }
-    let matches = 0;
-    for (const pattern of initPatterns) {
-      if (test(pattern, text) && ++matches === 2) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  wrap(W.Map.prototype, 'get', (target, thisArg, args) => {
-    if (
-      typeof args[0] === 'function'
-      && isInitFunction(sourceOf(args[0]))
-    ) {
-      abortAdShield();
-    }
-    return apply(target, thisArg, args);
-  });
-
-  const inventoryIdPattern = /inventory_id,[a-zA-Z0-9-]+\/[a-zA-Z0-9]+\/[a-zA-Z0-9]+/;
-  const reinsertionPatterns = [
-    /[a-z0-9A-Z]+\.setAttribute\( *('|\")onload('|\") *, *('|\")! *async *function\( *\) *\{ *let */,
-    /confirm\( *[A-Za-z0-9]+ *\) *\) *{ *const *[A-Za-z0-9]+ *= *new *[A-Za-z0-9]+\.URL\(('|\")https:\/\/report\.error-report\.com\//,
-    /\.forEach *\( *\( *[A-Za-z0-9]+ *=> *[A-Za-z0-9]+\.remove *\( *\) *\) *\) *\) *, *[0-9a-f]+ *\) *; *const *[A-Za-z0-9]+ *= *awai,t *\( *await *fetch *\(/,
-  ];
-
-  wrap(W.Map.prototype, 'set', (target, thisArg, args) => {
-    const [key, value] = args;
-    if (typeof key === 'string') {
-      if (
-        typeof value === 'string'
-        && (key.includes('inventory_id') || value.includes('inventory_id'))
-        && test(inventoryIdPattern, `${key},${value}`)
-      ) {
-        abortAdShield();
-      }
-      if (typeof value === 'function') {
-        const text = `${key},${sourceOf(value)}`;
-        if (
-          text.includes('error-report.com')
-          && all(reinsertionPatterns, text)
-        ) {
-          abortAdShield();
-        }
-      }
-    }
-    return apply(target, thisArg, args);
-  });
-
-  const secondaryInventoryKeys = ['device', 'id', 'regs', 'site', 'source'];
-  const frameIdPattern = /^[0-9]+\/[a-zA-Z0-9]+\/[a-zA-Z0-9]+\/[a-z0-9()-]+\/[a-zA-Z0-9_]+_slot[0-9]+_+/;
-
-  function isInventoryObject(value) {
-    if (!value || typeof value !== 'object') {
-      return false;
-    }
-    let operations = 6;
-
-    try {
-      if (!apply(propertyIsEnumerable, value, ['imp'])) {
-        return false;
-      }
-      let commonKeys = 1;
-      for (const key of secondaryInventoryKeys) {
-        if (apply(propertyIsEnumerable, value, [key])) {
-          commonKeys++;
-        }
-      }
-      if (commonKeys < 5) {
-        return false;
-      }
-
-      let topLevelKeys = 0;
-      for (const key in value) {
-        if (!apply(propertyIsEnumerable, value, [key])) {
-          continue;
-        }
-        if (++topLevelKeys > 300 || ++operations > 10_000) {
-          return false;
-        }
-
-        const items = value[key];
-        if (!isArray(items)) {
-          continue;
-        }
-        const length = Math.min(items.length, 1_000);
-
-        for (let index = 0; index < length; index++) {
-          if (++operations > 10_000) {
-            return false;
-          }
-          const item = items[index];
-          if (!item || typeof item !== 'object') {
-            continue;
-          }
-
-          let innerKeys = 0;
-          for (const innerKey in item) {
-            if (!apply(propertyIsEnumerable, item, [innerKey])) {
-              continue;
-            }
-            if (++innerKeys > 100 || ++operations > 10_000) {
-              return false;
-            }
-            if (test(frameIdPattern, innerKey)) {
-              return true;
-            }
-          }
-        }
-        if (items.length > 1_000) {
-          return false;
-        }
-      }
-    } catch {
-      return false;
-    }
-    return false;
-  }
-
-  wrap(W.WeakMap.prototype, 'set', (target, thisArg, args) => {
-    if (isInventoryObject(args[0])) {
-      abortAdShield();
-    }
-    return apply(target, thisArg, args);
-  });
-
-  const timerPatterns = [
-    /async *\( *\) *=> *{ *const *[A-Za-z0-9]+ *= *[A-Za-z0-9]+ *; *await *[A-Za-z0-9]+ *\( *\)/,
-    /; *await *[A-Za-z0-9]+ *\( *\) *, *[A-Za-z0-9]+ *\( *! *1 *, *new *Error *\( *[A-Za-z0-9]+ *\( *[0-9a-f]+ *\) *\) *\) *}/,
-    / *\) *\) *\) *}/,
-  ];
-  const AsyncFunction = (async () => {}).constructor;
-
-  function isAdShieldTimer(handler) {
-    if (typeof handler === 'function') {
-      try {
-        if (handler.constructor !== AsyncFunction) {
-          return false;
-        }
-      } catch {
-        return false;
-      }
-    }
-    if (typeof handler !== 'function' && typeof handler !== 'string') {
-      return false;
-    }
-    const text = typeof handler === 'function' ? sourceOf(handler) : handler;
-    return text.includes('new Error') && all(timerPatterns, text);
-  }
-
-  for (const key of ['setTimeout', 'setInterval']) {
-    wrap(W, key, (target, thisArg, args) => {
-      if (isAdShieldTimer(args[0])) {
-        markDetected();
-        return undefined;
-      }
-      return apply(target, thisArg, args);
-    });
-  }
+  apply(weakSet, originals, [toString, functionToString]);
+  W.Function.prototype.toString = toString;
+  restoreCallbacks.push([W.Function.prototype, 'toString', functionToString, toString]);
 
   function restoreIfUnused() {
     if (detected) {
       return;
     }
     for (let index = restoreCallbacks.length - 1; index >= 0; index--) {
-      restoreCallbacks[index]();
+      const [owner, key, original, replacement] = restoreCallbacks[index];
+      if (owner[key] === replacement) {
+        owner[key] = original;
+      }
     }
+    recoveryObserver?.disconnect();
+    restoreCallbacks.length = 0;
   }
 
   function scheduleRestore() {
-    recoverAdShieldTree(W.document);
+    if (!recoveryObserver) {
+      recoverAdShieldTree(document);
+    }
     apply(originalSetTimeout, W, [restoreIfUnused, 30_000]);
   }
 
-  recoverAdShieldTree(W.document);
+  startRecoveryObserver();
+  recoverAdShieldTree(document);
 
-  if (W.document?.readyState === 'complete') {
+  if (document?.readyState === 'complete') {
     scheduleRestore();
   } else if (typeof W.addEventListener === 'function') {
     apply(W.addEventListener, W, ['load', scheduleRestore, { once: true }]);
